@@ -1,0 +1,11 @@
+=== Charge Brake controller simulation (true net power, after first 10 min) ===
+base: +400mW, gain 1.2W, 1s sensor net mean    +28 mW  sd   121  burn 31.0% (sd 10.1)  level 60-61%  settle   87s  jitter/60s 0.9%  big burn reversals/h 2
+weak burn gain 0.6W                net mean    +23 mW  sd    87  burn 62.9% (sd 14.4)  level 60-61%  settle  144s  jitter/60s 0.8%  big burn reversals/h 0
+strong burn gain 3W                net mean    +18 mW  sd   128  burn 12.7% (sd  4.3)  level 60-61%  settle   30s  jitter/60s 0.3%  big burn reversals/h 2
+laggy sensor (5s avg, 2s update)   net mean    +22 mW  sd   126  burn 31.5% (sd 10.5)  level 60-61%  settle   71s  jitter/60s 1.5%  big burn reversals/h 6
+bigger surplus +800mW              net mean    +28 mW  sd   122  burn 64.3% (sd 10.2)  level 60-61%  settle  119s  jitter/60s 0.9%  big burn reversals/h 2
+surplus +1000mW > max burn (info)  net mean    +52 mW  sd    30  burn 79.0% (sd  2.5)  level 60-62%  settle  121s  jitter/60s 0.0%
+start 59.6%, target 60%            max burn below target 0%, reached 60% after 10 min, then held at 61%
+fast charger 10W                   latched off after 5.8s, burn after latch 0%
+random usage spikes 0.3-1.5W       net mean    +27 mW  sd   243  burn 23.8% (sd 12.9)  level 60-61%  settle   72s  jitter/60s 3.8%  backoff to <20% in median 2.5s (n=32)
+% mode (backup), 6h, spikes        net mean     -1 mW  sd   441  burn 20.3% (sd 19.9)  level 60-61%  settle   30s  jitter/60s 5.3%
