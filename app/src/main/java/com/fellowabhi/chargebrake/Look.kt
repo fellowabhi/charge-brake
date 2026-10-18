@@ -41,7 +41,7 @@ object Look {
     }
     fun glyph(s: St) = when (s) {
         St.BRAKING -> "‖"; St.HOLDING, St.IDLE -> "✓"; St.IN_USE -> "↓"; St.CHARGING_UP -> "↑"
-        St.HOT -> "!"; St.NO_READING -> "?"; St.PAUSED -> "‖"; else -> "⏻"
+        St.HOT -> "!"; St.NO_READING -> "?"; St.PAUSED -> "‖"; St.FAST -> "!"; else -> "×"
     }
     fun icon(s: St) = when (s) {
         St.BRAKING -> R.drawable.ic_st_brake
