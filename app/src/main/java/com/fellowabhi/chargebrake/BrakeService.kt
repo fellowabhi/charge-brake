@@ -12,28 +12,33 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
+import java.util.Locale
 
 class BrakeService : Service() {
     private var wl: PowerManager.WakeLock? = null
     private var running = false
     private var lastNote = 0L
+    private var lastKey = ""
     private val nm by lazy { getSystemService(NotificationManager::class.java) }
     private val onTick: () -> Unit = {
         val now = SystemClock.elapsedRealtime()
-        if (now - lastNote > 3000) { lastNote = now; runCatching { nm.notify(ID, note()) } }
+        if (now - lastNote >= 1500) { lastNote = now; post() }
     }
 
     override fun onBind(i: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) { stopSelf(); return START_NOT_STICKY }
-        nm.createNotificationChannel(NotificationChannel(CH, "Charge Brake", NotificationManager.IMPORTANCE_LOW))
+        when (intent?.action) {
+            ACTION_STOP -> { stopSelf(); return START_NOT_STICKY }
+            ACTION_PAUSE -> { Monitor.setPaused(!Monitor.ctl.paused); lastNote = 0; return START_STICKY }
+        }
+        nm.createNotificationChannel(NotificationChannel(CH, "Charge Brake", NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) })
         if (Build.VERSION.SDK_INT >= 34) startForeground(ID, note(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         else startForeground(ID, note())
         if (!running) {
             running = true
             Monitor.acquire(this)
-            Monitor.setEnabled(true, resume = intent == null) // null = restarted by the system: keep old hold level
+            Monitor.setEnabled(true, resume = intent == null)
             wl = (getSystemService(Context.POWER_SERVICE) as PowerManager)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "chargebrake:brake").apply { setReferenceCounted(false); acquire() }
             Monitor.listeners.add(onTick)
@@ -52,16 +57,36 @@ class BrakeService : Service() {
         super.onDestroy()
     }
 
+    private fun post() {
+        val n = note()
+        runCatching { nm.notify(ID, n) }
+    }
+
     private fun note(): Notification {
-        val m = Monitor; val c = m.ctl
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        val stop = PendingIntent.getService(this, 1, Intent(this, BrakeService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
+        val m = Monitor; val c = m.ctl; val st = m.state
+        val pi = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), pi)
+        val stop = PendingIntent.getService(this, 1, Intent(this, BrakeService::class.java).setAction(ACTION_STOP), pi)
+        val pause = PendingIntent.getService(this, 2, Intent(this, BrakeService::class.java).setAction(ACTION_PAUSE), pi)
+        val brake = (c.burn * 100).toInt()
+        val title = when (st) {
+            St.BRAKING, St.HOLDING, St.IDLE, St.IN_USE -> "${Look.title(st, m).lowercase(Locale.US).replaceFirstChar { it.uppercase() }.substringBefore(" ")} · brake $brake% · hold ${c.hold()}%"
+            else -> Look.title(st, m).lowercase(Locale.US).replaceFirstChar { it.uppercase() }
+        }
+        val sur = if (m.plugged == 0) "n/a" else "~" + fmtSigned(m.avgMw + m.burnMw) + " mW"
+        val text = String.format(Locale.US, "%s mW net · surplus %s · %.1f °C · %d%%", fmtSigned(m.avgMw), sur, m.temp, m.pct)
         return Notification.Builder(this, CH)
-            .setSmallIcon(R.drawable.ic_note)
-            .setContentTitle(c.state)
-            .setContentText(String.format("%+.0f mW · burn %d%% · hold %d%% · %d%%", m.mW, (c.burn * 100).toInt(), c.hold(), m.pct))
-            .setOngoing(true).setOnlyAlertOnce(true).setContentIntent(open)
+            .setSmallIcon(Look.icon(st))
+            .setColor(Look.color(st))
+            .setContentTitle(title)
+            .setContentText(text)
+            .setSubText(Look.sub(st, m))
+            .setProgress(100, brake, false)
+            .setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false).setContentIntent(open)
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .addAction(Notification.Action.Builder(null, if (c.paused) "Resume" else "Pause", pause).build())
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
+            .addAction(Notification.Action.Builder(null, "Open", open).build())
             .build()
     }
 
@@ -69,6 +94,7 @@ class BrakeService : Service() {
         const val ID = 1
         const val CH = "brake"
         const val ACTION_STOP = "stop"
+        const val ACTION_PAUSE = "pause"
         fun start(c: Context) = c.startForegroundService(Intent(c, BrakeService::class.java))
         fun stop(c: Context) = c.stopService(Intent(c, BrakeService::class.java))
     }

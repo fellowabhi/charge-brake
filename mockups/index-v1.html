@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charge Brake v0.2 mockup</title>
+<style>
+  :root{
+    --bg:#0E0F12; --card:#191C22; --card2:#20242B; --line:#2A2F38;
+    --txt:#E8EAED; --dim:#8E949E; --faint:#5D636D;
+    --green:#4CD07D; --amber:#FFB300; --blue:#4FA3FF; --brake:#FF7043; --red:#EF5350; --grey:#9AA0A6;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg);color:var(--txt);font-family:Roboto,"Noto Sans","Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  body{overflow:hidden}
+  .app>*,.left>*,.right>*{flex:none}
+  .screen{width:100vw;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+  .sbar{height:28px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 18px;font-size:13px;color:var(--dim)}
+  .app{flex:1;min-height:0;padding:4px 16px 14px;display:flex;flex-direction:column;gap:10px}
+  .title{display:flex;align-items:center;justify-content:space-between;font-size:13px;letter-spacing:.12em;color:var(--dim);font-weight:500}
+  .title .ex{letter-spacing:0;font-size:11px;color:var(--faint);border:1px solid var(--line);border-radius:6px;padding:1px 6px}
+  .card{background:var(--card);border-radius:16px}
+
+  /* hero */
+  .hero .lbl{font-size:14px;color:var(--dim)}
+  .hero .num{font-size:56px;font-weight:700;line-height:1.05;letter-spacing:-.02em;color:var(--green)}
+  .hero .num small{font-size:26px;font-weight:600;margin-left:4px}
+  .hero .raw{font-size:13px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .scale{display:flex;gap:10px;font-size:11px;color:var(--faint);margin-top:4px}
+  .scale i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:0}
+
+  /* banner */
+  .banner{border-radius:14px;padding:12px 14px;display:flex;align-items:center;gap:12px}
+  .banner .ic{width:34px;height:34px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:18px;font-weight:700;background:rgba(0,0,0,.25)}
+  .banner b{display:block;font-size:17px;letter-spacing:.01em}
+  .banner span{font-size:13px;opacity:.85}
+  .b-brake{background:#2B1A12;color:#FFB59A;border:1px solid #5A2E1C}
+  .b-brake .ic{color:var(--brake)}
+  .b-charge{background:#2A2208;color:#FFD866;border:1px solid #5A4710}
+  .b-hot{background:#2E1416;color:#FF9A98;border:1px solid #632428}
+  .b-off{background:#1E2126;color:#C4C8CE;border:1px solid #3A3F47}
+
+  /* tiles */
+  .tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .tile{background:var(--card);border-radius:14px;padding:10px 12px;min-width:0}
+  .tile .k{font-size:12px;color:var(--dim);display:flex;align-items:center;gap:6px}
+  .tile .k i{width:8px;height:8px;border-radius:2px;display:inline-block}
+  .tile .v{font-size:24px;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .tile .s{font-size:11.5px;color:var(--dim);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bar{height:5px;border-radius:3px;background:var(--line);margin-top:6px;overflow:hidden}
+  .bar>div{height:100%;border-radius:3px}
+
+  /* graph */
+  .graph{padding:10px 10px 6px;display:flex;flex-direction:column;min-height:0}
+  .ghead{display:flex;justify-content:space-between;align-items:baseline;padding:0 4px}
+  .ghead b{font-size:14px;font-weight:600}
+  .ghead span{font-size:11px;color:var(--dim)}
+  .legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--dim);padding:6px 4px 2px}
+  .legend i{display:inline-block;width:14px;height:3px;border-radius:2px;margin-right:5px;vertical-align:3px}
+  .legend i.area{height:9px;vertical-align:0;opacity:.55}
+  .legend i.band{height:9px;vertical-align:0;background:rgba(76,208,125,.18);border:1px dashed rgba(76,208,125,.7)}
+  svg{display:block;width:100%}
+  svg text{font-family:inherit;fill:var(--dim)}
+  .gexp{font-size:11px;color:var(--faint);padding:2px 4px 0;line-height:1.35}
+
+  /* controls */
+  .controls{display:flex;flex-direction:column;gap:8px}
+  .brakebtn{display:flex;align-items:center;justify-content:space-between;background:var(--card);border-radius:16px;padding:12px 14px}
+  .brakebtn b{font-size:18px}
+  .brakebtn span{display:block;font-size:12px;color:var(--dim)}
+  .toggle{width:64px;height:36px;border-radius:18px;background:var(--brake);position:relative;flex:none}
+  .toggle::after{content:"";position:absolute;right:4px;top:4px;width:28px;height:28px;border-radius:50%;background:#fff}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .chip{border:1px solid var(--line);border-radius:999px;padding:7px 12px;font-size:13px;color:var(--dim);white-space:nowrap}
+  .chip.on{background:#123A40;border-color:#1F6E77;color:#7FE3EE}
+  .brakebtn span.ind{color:var(--green);margin-top:2px}
+  .details{display:flex;justify-content:space-between;align-items:center;background:var(--card);border-radius:14px;padding:12px 14px;font-size:14px;color:var(--dim)}
+  .details b{color:var(--txt);font-weight:500}
+
+  /* inner 2-pane */
+  .inner .app{display:grid;grid-template-columns:1.25fr 1fr;grid-template-rows:auto 1fr;gap:12px 16px;padding:6px 20px 16px}
+  .inner .title{grid-column:1/3}
+  .inner .left{display:flex;flex-direction:column;gap:10px;min-height:0}
+  .inner .right{display:flex;flex-direction:column;gap:10px;min-height:0}
+  .inner .graph{flex:1 1 auto}
+  .cover .app{gap:8px}
+  .cover .hero .num{font-size:50px}
+  .cover .tile{padding:8px 12px}
+  .cover .tile .v{font-size:22px}
+  .cover .gexp{display:none}
+  .cover .scale{display:none}
+  .cover .banner{padding:9px 14px}
+  .cover .app{padding-bottom:10px}
+  .cover .hero .lbl{font-size:13px}
+  .cover .legend{gap:2px 10px;font-size:10.5px}
+  .cover .brakebtn{padding:10px 14px}
+  .cover .details{padding:10px 14px}
+  .cover .chip{padding:6px 12px}
+  .inner .right{gap:12px}
+  .inner .hero .num{font-size:60px}
+
+  /* states sheet */
+  .states .app{gap:12px}
+  .states h3{font-size:13px;color:var(--dim);font-weight:500;letter-spacing:.08em;margin-top:4px}
+  .states .note{font-size:12px;color:var(--faint);margin-top:-6px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const P = new URLSearchParams(location.search);
+const mode = P.get('screen') || (innerWidth >= 600 ? 'inner' : 'cover');
+
+// ---------- example data (5 min window, 2 s steps) ----------
+function series(){
+  const N=150, net=[], brake=[], mah=[];
+  let r=7; const rnd=()=>{r=(r*16807)%2147483647; return r/2147483647-0.5};
+  let m=2861;
+  for(let i=0;i<N;i++){
+    const t=i/(N-1)*300; let n,b;
+    if(t<14){ n=-650+rnd()*120; b=0; }                       // on battery
+    else if(t<40){ n=-650+(t-14)/26*1550+rnd()*160; b=0; }      // plugged in, climbs
+    else if(t<55){ n=900+rnd()*180; b=(t-40)/15*0.12; }           // surplus, brake starts
+    else if(t<120){ const k=(t-55)/65; n=900*Math.exp(-k*3.2)+rnd()*120; b=0.12+0.30*(1-Math.exp(-k*3)); }
+    else if(t<180){ n=20+rnd()*110; b=0.40+rnd()*0.03; }
+    else if(t<205){ n=-720+rnd()*200; b=Math.max(0.05,0.40-(t-180)/4*0.35); } // usage dip
+    else if(t<240){ const k=(t-205)/35; n=480*(1-k)+rnd()*130; b=0.06+0.32*k; }
+    else { n=42+rnd()*100; b=0.38+rnd()*0.025; }
+    if(t>=180&&t<205) b=Math.max(0.04,0.40-(t-180)*0.12);
+    net.push(n); brake.push(Math.max(0,Math.min(1,b)));
+    m = t<14?2862: t<120? 2862+12*(1-Math.exp(-(t-14)/35)) : t<205? 2874-(t>180?(t-180)*0.04:0) : 2873+Math.min(1,(t-205)/30); mah.push(m+rnd()*0.3);
+  }
+  return {N,net,brake,mah};
+}
+const D = series();
+
+function graphSVG(w,h){
+  const L=46,R=40,T=10,B=24, W=w-L-R, H=h-T-B;
+  const lo=-1000, hi=1200;
+  const x=i=>L+i/(D.N-1)*W, y=v=>T+(hi-v)/(hi-lo)*H, yb=b=>T+H-b*H;
+  let s=`<svg viewBox="0 0 ${w} ${h}" height="${h}">`;
+  // grid + left axis
+  for(const v of [-1000,-500,0,500,1000]){
+    s+=`<line x1="${L}" x2="${L+W}" y1="${y(v)}" y2="${y(v)}" stroke="${v==0?'#4A505A':'#262A31'}" stroke-width="1"/>`;
+    s+=`<text x="${L-6}" y="${y(v)+4}" font-size="10.5" text-anchor="end">${v>0?'+':''}${v}</text>`;
+  }
+  // right axis brake %
+  for(const p of [0,50,100]) s+=`<text x="${L+W+6}" y="${yb(p/100)+4}" font-size="10.5" fill="#FF8A65" style="fill:#C9785F">${p}%</text>`;
+  // brake area
+  let a=`M${x(0)},${yb(0)}`; D.brake.forEach((b,i)=>a+=` L${x(i)},${yb(b)}`); a+=` L${x(D.N-1)},${yb(0)} Z`;
+  s+=`<path d="${a}" fill="rgba(255,112,67,.22)" stroke="rgba(255,112,67,.55)" stroke-width="1"/>`;
+  // target band
+  s+=`<rect x="${L}" y="${y(100)}" width="${W}" height="${y(-100)-y(100)}" fill="rgba(76,208,125,.13)"/>`;
+  s+=`<line x1="${L}" x2="${L+W}" y1="${y(100)}" y2="${y(100)}" stroke="rgba(76,208,125,.65)" stroke-dasharray="5 4"/>`;
+  s+=`<line x1="${L}" x2="${L+W}" y1="${y(-100)}" y2="${y(-100)}" stroke="rgba(76,208,125,.65)" stroke-dasharray="5 4"/>`;
+  // net line
+  let p=''; D.net.forEach((n,i)=>p+=(i?' L':'M')+x(i).toFixed(1)+','+y(n).toFixed(1));
+  s+=`<path d="${p}" fill="none" stroke="#E8EAED" stroke-width="2" stroke-linejoin="round"/>`;
+  // annotations
+  const ann=(i,v,txt,end)=>{s+=`<circle cx="${x(i)}" cy="${y(v)}" r="3" fill="#E8EAED"/><text x="${x(i)+(end?-7:7)}" y="${y(v)+4}" font-size="10" text-anchor="${end?'end':'start'}" style="fill:#B9BEC6">${txt}</text>`};
+  ann(7,-650,'plugged in'); ann(26,960,'surplus'); ann(91,-700,h<200?'in use':'you used the phone',1);
+  s+=`<circle cx="${x(D.N-1)}" cy="${y(D.net[D.N-1])}" r="4" fill="var(--green)"/>`;
+  // x axis
+  for(const [i,t] of [[0,'−5 min'],[60,'−3'],[120,'−1'],[D.N-1,'now']]) s+=`<text x="${x(i)}" y="${h-6}" font-size="10.5" text-anchor="${i==0?'start':i==D.N-1?'end':'middle'}">${t}</text>`;
+  s+=`<text x="12" y="${T+H/2}" font-size="10" transform="rotate(-90 12 ${T+H/2})" text-anchor="middle">net mW</text>`;
+  s+=`<text x="${w-6}" y="${T+H/2}" font-size="10" transform="rotate(90 ${w-6} ${T+H/2})" text-anchor="middle" style="fill:#C9785F">brake %</text>`;
+  return s+'</svg>';
+}
+
+function stripSVG(w,h){
+  const L=46,R=40,T=8,B=16,W=w-L-R,H=h-T-B, lo=2858, hi=2884;
+  const x=i=>L+i/(D.N-1)*W, y=v=>T+(hi-v)/(hi-lo)*H;
+  let s=`<svg viewBox="0 0 ${w} ${h}" height="${h}">`;
+  s+=`<line x1="${L}" x2="${L+W}" y1="${y(2880)}" y2="${y(2880)}" stroke="#4FA3FF" stroke-dasharray="5 4"/>`;
+  s+=`<text x="${L+W+6}" y="${y(2880)+4}" font-size="10" style="fill:#7DB8FF">60%</text>`;
+  s+=`<text x="${L-6}" y="${y(2880)+4}" font-size="10" text-anchor="end">2,880</text><text x="${L-6}" y="${y(2860)+4}" font-size="10" text-anchor="end">2,860</text>`;
+  let p=''; D.mah.forEach((m,i)=>p+=(i?' L':'M')+x(i).toFixed(1)+','+y(m).toFixed(1));
+  s+=`<path d="${p}" fill="none" stroke="#4FA3FF" stroke-width="2"/>`;
+  s+=`<text x="${L+6}" y="${y(2880)-4}" font-size="10" style="fill:#7DB8FF">target 2,880 mAh</text>`;
+  s+=`<text x="${L}" y="${h-3}" font-size="10">charge (mAh)</text><text x="${L+W}" y="${h-3}" font-size="10" text-anchor="end">now 2,874 mAh · 56%</text>`;
+  return s+'</svg>';
+}
+
+const banners = {
+  brake:['b-brake','‖','BRAKING','using ~420 mW to hold 56%'],
+  charge:['b-charge','↑','CHARGING UP','to 60% target · brake idle'],
+  hot:['b-hot','!','PAUSED: TOO HOT','46 °C ≥ 45 °C cutoff · resumes < 44 °C'],
+  off:['b-off','⏻','OFF: FAST CHARGING','3.8 W detected · retry in 2 min'],
+};
+const banner=k=>{const [c,i,b,s]=banners[k];return `<div class="banner ${c}"><div class="ic">${i}</div><div><b>${b}</b><span>${s}</span></div></div>`};
+
+const hero = `<div class="hero">
+  <div class="lbl">Net into battery <span style="color:var(--faint)">· 3 s average</span></div>
+  <div class="num">+42<small>mW</small></div>
+  <div class="raw">raw +118 mW · +30 mA · 3.962 V · sensor 1.8 Hz</div>
+  <div class="scale"><span><i style="background:var(--green)"></i>≈ 0 holding</span><span><i style="background:var(--amber)"></i>charging</span><span><i style="background:var(--blue)"></i>draining</span></div>
+</div>`;
+
+const tiles = `<div class="tiles">
+  <div class="tile"><div class="k"><i style="background:var(--blue)"></i>Battery</div><div class="v">56%</div>
+    <div class="s">2,874 mAh · target 2,880</div><div class="s" style="color:var(--faint)">source: fuel gauge</div></div>
+  <div class="tile"><div class="k"><i style="background:var(--brake)"></i>Brake level</div><div class="v">38%</div>
+    <div class="bar"><div style="width:38%;background:var(--brake)"></div></div><div class="s">4 threads · low priority</div></div>
+  <div class="tile"><div class="k"><i style="background:var(--amber)"></i>Charger surplus</div><div class="v">~460 mW</div>
+    <div class="s">net + what brake uses</div></div>
+  <div class="tile"><div class="k"><i style="background:var(--grey)"></i>Temperature</div><div class="v">39.2 °C</div>
+    <div class="bar"><div style="width:${(39.2-25)/(45-25)*100}%;background:linear-gradient(90deg,#4CD07D,#FFB300)"></div></div><div class="s">cutoff 45 °C</div></div>
+</div>`;
+
+const legend = `<div class="legend">
+  <span><i style="background:#E8EAED"></i>net power (mW, left)</span>
+  <span><i class="area" style="background:var(--brake)"></i>brake level (%, right)</span>
+  <span><i class="band"></i>target band (±100 mW)</span></div>`;
+
+function graphCard(w,h){ return `<div class="card graph">
+  <div class="ghead"><b>Power, last 5 min</b><span>tap: 1 / 5 / 30 min</span></div>
+  ${legend}${graphSVG(w,h)}
+  <div class="gexp">Above the band = battery is charging, so the brake rises. Below = phone is using more than the charger gives, so the brake backs off.</div>
+  </div>`; }
+const strip = (w,h=62) => `<div class="card" style="padding:6px 10px 4px">${stripSVG(w,h)}</div>`;
+
+const controls = `<div class="controls">
+  <div class="brakebtn"><div><b>Brake ON</b><span class="ind">☀ Screen stays on while plugged</span></div><div class="toggle"></div></div>
+  <div class="row"><span class="chip on">● Hold current (56%)</span><span class="chip">Target %</span></div>
+  <div class="details"><span><b>Details</b> · cutoffs, mode, sensor, log</span><span>▾</span></div>
+</div>`;
+
+const sbar = `<div class="sbar"><span>15:45</span><span>⚡ 56%</span></div>`;
+const title = `<div class="title"><span>CHARGE BRAKE</span><span class="ex">mockup · example values</span></div>`;
+const root = document.getElementById('root');
+const cw = innerWidth - 32 - 20;
+
+if (mode === 'cover') {
+  root.innerHTML = `<div class="screen cover">${sbar}<div class="app">${title}${hero}${banner('brake')}${tiles}${graphCard(cw,146)}${strip(innerWidth-32-20,54)}${controls}</div></div>`;
+} else if (mode === 'inner') {
+  const lw = Math.round((innerWidth-40-16)*1.25/2.25) - 20;
+  const rw = Math.round((innerWidth-40-16)*1/2.25) - 20;
+  root.innerHTML = `<div class="screen inner">${sbar}<div class="app">${title}
+    <div class="left">${graphCard(lw, 700)}</div>
+    <div class="right">${hero}${banner('brake')}${tiles}${strip(rw,70)}${controls}</div></div></div>`;
+} else {
+  root.innerHTML = `<div class="screen states">${sbar}<div class="app">${title}
+    <h3>STATUS BANNER STATES</h3><div class="note">One banner at a time, under the big number. Colour = what the brake is doing.</div>
+    ${banner('brake')}${banner('charge')}${banner('hot')}${banner('off')}
+    <h3>BIG NUMBER COLOURS</h3>
+    <div class="tiles">
+      <div class="tile"><div class="k">holding (≈ 0)</div><div class="v" style="color:var(--green)">+42 mW</div></div>
+      <div class="tile"><div class="k">charging</div><div class="v" style="color:var(--amber)">+860 mW</div></div>
+      <div class="tile"><div class="k">draining</div><div class="v" style="color:var(--blue)">−310 mW</div></div>
+      <div class="tile"><div class="k">rule</div><div class="s" style="white-space:normal;margin-top:4px">green inside ±150 mW, amber above, blue below</div></div>
+    </div></div></div>`;
+}
+</script>
+</body>
+</html>

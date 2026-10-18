@@ -6,49 +6,40 @@ import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.SeekBar
 import android.widget.TextView
 
-const val C_TXT = 0xFFE8EAED.toInt()
-const val C_DIM = 0xFF8A8F98.toInt()
-const val C_ACC = 0xFF26C6DA.toInt()
-const val C_ON = 0xFFE64A19.toInt()
-const val C_CARD = 0xFF1C1F26.toInt()
-
 fun Activity.dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+fun Activity.dpf(v: Float) = v * resources.displayMetrics.density
 
-fun Activity.text(size: Float, color: Int = C_TXT, bold: Boolean = false, mono: Boolean = false) = TextView(this).apply {
-    textSize = size; setTextColor(color)
+fun Activity.text(size: Float, color: Int = C_TXT, bold: Boolean = false, mono: Boolean = false, txt: String = "") = TextView(this).apply {
+    textSize = size; setTextColor(color); text = txt
     typeface = Typeface.create(if (mono) Typeface.MONOSPACE else Typeface.DEFAULT, if (bold) Typeface.BOLD else Typeface.NORMAL)
+    includeFontPadding = false
 }
 
-fun Activity.button(label: String, bg: Int = C_CARD, onClick: () -> Unit) = Button(this).apply {
-    text = label; isAllCaps = false; setTextColor(C_TXT); textSize = 15f
-    background = round(bg, dp(12).toFloat())
-    stateListAnimator = null
+fun round(color: Int, r: Float, strokeColor: Int = 0, strokeW: Int = 0) = GradientDrawable().apply {
+    setColor(color); cornerRadius = r; if (strokeW > 0) setStroke(strokeW, strokeColor)
+}
+
+fun lp(w: Int = ViewGroup.LayoutParams.MATCH_PARENT, h: Int = ViewGroup.LayoutParams.WRAP_CONTENT, weight: Float = 0f, top: Int = 0) =
+    LinearLayout.LayoutParams(w, h, weight).apply { topMargin = top }
+
+fun LinearLayout.add(v: View, top: Int = 0, h: Int = ViewGroup.LayoutParams.WRAP_CONTENT, w: Int = ViewGroup.LayoutParams.MATCH_PARENT, weight: Float = 0f): View {
+    addView(v, lp(w, h, weight, top)); return v
+}
+
+fun Activity.row(vararg vs: View, gap: Int = 8) = LinearLayout(this).apply {
+    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+    vs.forEachIndexed { k, v -> addView(v, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { if (k > 0) leftMargin = dp(gap) }) }
+}
+
+/** Selectable chip. */
+fun Activity.chip(label: String, on: Boolean, onClick: () -> Unit) = text(13f, if (on) 0xFF7FE3EE.toInt() else C_DIM, txt = label).apply {
+    setPadding(dp(12), dp(7), dp(12), dp(7))
+    background = if (on) round(0xFF123A40.toInt(), dpf(99f), 0xFF1F6E77.toInt(), dp(1)) else round(0, dpf(99f), C_LINE, dp(1))
     setOnClickListener { onClick() }
-}
-
-fun round(color: Int, r: Float) = GradientDrawable().apply { setColor(color); cornerRadius = r }
-
-fun LinearLayout.add(v: View, top: Int = 0, h: Int = ViewGroup.LayoutParams.WRAP_CONTENT): View {
-    addView(v, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h).apply { topMargin = top })
-    return v
-}
-
-fun Activity.seg(parent: LinearLayout, labels: List<String>, sel: Int, onSel: (Int) -> Unit) {
-    val g = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
-    labels.forEachIndexed { k, s ->
-        g.addView(RadioButton(this).apply { id = 100 + k; text = s; setTextColor(C_TXT); textSize = 14f; gravity = Gravity.CENTER_VERTICAL },
-            RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-    }
-    g.check(100 + sel)
-    g.setOnCheckedChangeListener { _, id -> onSel(id - 100) }
-    parent.add(g, dp(4))
 }
 
 fun Activity.slider(parent: LinearLayout, label: String, min: Int, max: Int, step: Int, value: Int, fmt: (Int) -> String, set: (Int) -> Unit) {
@@ -57,9 +48,9 @@ fun Activity.slider(parent: LinearLayout, label: String, min: Int, max: Int, ste
     fun upd(v: Int) { tv.text = "$label: ${fmt(v)}" }
     upd(min + sb.progress * step)
     sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-        override fun onProgressChanged(s: SeekBar, p: Int, user: Boolean) { val v = min + p * step; upd(v); if (user) { set(v); Monitor.save() } }
+        override fun onProgressChanged(s: SeekBar, p: Int, user: Boolean) { upd(min + p * step) }
         override fun onStartTrackingTouch(s: SeekBar) {}
-        override fun onStopTrackingTouch(s: SeekBar) {}
+        override fun onStopTrackingTouch(s: SeekBar) { set(min + s.progress * step) }
     })
-    parent.add(tv, dp(10)); parent.add(sb)
+    parent.add(tv, dp(12)); parent.add(sb, dp(2))
 }

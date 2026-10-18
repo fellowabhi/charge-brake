@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charge Brake v0.2 mockup (live)</title>
+<style>
+  :root{
+    --bg:#0B0C0F; --card:#16191F; --line:#2A2F38; --txt:#E8EAED; --dim:#8E949E; --faint:#5D636D;
+    --g:255,112,67;  /* state glow rgb, set by JS */
+    --n:76,208,125;  /* number colour rgb, set by JS */
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg);color:var(--txt);font-family:Roboto,"Noto Sans","Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden}
+  body{background:radial-gradient(120% 60% at 70% 0%, rgba(var(--g),.10), transparent 60%), var(--bg)}
+  .screen{width:100vw;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+  .app>*,.panel>*,.gcell>*,.bottom>*,.ctrls>*{flex:none}
+
+  /* status bar */
+  .sbar{height:28px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 16px;font-size:13px;color:#C9CDD3}
+  .sbar .l,.sbar .r{display:flex;align-items:center;gap:7px}
+  .sbar svg{display:block}
+  .sicon{filter:drop-shadow(0 0 3px rgba(var(--g),.9))}
+
+  .app{flex:1;min-height:0;padding:4px 16px 10px;display:flex;flex-direction:column;gap:8px}
+  .title{display:flex;align-items:center;justify-content:space-between;font-size:13px;letter-spacing:.12em;color:var(--dim);font-weight:500}
+  .title .r{display:flex;align-items:center;gap:8px}
+  .ex{letter-spacing:0;font-size:10.5px;color:var(--faint);border:1px solid var(--line);border-radius:6px;padding:1px 6px}
+  .live{display:flex;align-items:center;gap:5px;letter-spacing:.08em;font-size:11px;color:#FF6B6B;font-weight:700}
+  .live i{width:8px;height:8px;border-radius:50%;background:#FF4D4D;box-shadow:0 0 8px #FF4D4D}
+  .card{background:var(--card);border-radius:16px}
+  .glow{box-shadow:0 0 22px rgba(var(--g),.28), inset 0 0 0 1px rgba(var(--g),.45);
+        background:linear-gradient(180deg, rgba(var(--g),.13), rgba(var(--g),.04)), var(--card)}
+
+  .hero .lbl{font-size:13px;color:var(--dim)}
+  .hero .num{font-size:50px;font-weight:700;line-height:1.05;letter-spacing:-.02em;color:rgb(var(--n));text-shadow:0 0 18px rgba(var(--n),.55);font-variant-numeric:tabular-nums}
+  .hero .num small{font-size:24px;font-weight:600;margin-left:4px}
+  .hero .raw{font-size:12.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+
+  .banner{border-radius:14px;padding:9px 14px;display:flex;align-items:center;gap:12px;color:rgb(var(--g));
+          background:linear-gradient(90deg, rgba(var(--g),.22), rgba(var(--g),.07));box-shadow:0 0 26px rgba(var(--g),.30), inset 0 0 0 1px rgba(var(--g),.55)}
+  .banner .ic{width:32px;height:32px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:17px;font-weight:800;background:rgba(var(--g),.18);box-shadow:0 0 14px rgba(var(--g),.6)}
+  .banner b{display:block;font-size:16px;letter-spacing:.02em;text-shadow:0 0 10px rgba(var(--g),.6)}
+  .banner span{display:block;font-size:12.5px;color:#D9DCE1;opacity:.9}
+
+  .tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .tile{background:var(--card);border-radius:14px;padding:8px 12px;min-width:0;position:relative}
+  .tile .k{font-size:12px;color:var(--dim);display:flex;align-items:center;gap:6px}
+  .tile .k i{width:8px;height:8px;border-radius:2px;display:inline-block}
+  .tile .v{font-size:22px;font-weight:600;margin-top:1px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .tile .s{font-size:11.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bar{height:5px;border-radius:3px;background:#262A31;margin-top:5px;overflow:hidden}
+  .bar>div{height:100%;border-radius:3px}
+  #brakeTile{box-shadow:0 0 calc(var(--bk) * 26px) rgba(255,112,67,calc(var(--bk) * .9)), inset 0 0 0 1px rgba(255,112,67,calc(var(--bk) * 1.2))}
+  #brakeBar{background:#FF7043;box-shadow:0 0 8px #FF7043}
+
+  .graph{padding:10px 10px 6px;display:flex;flex-direction:column;min-height:0}
+  .ghead{display:flex;justify-content:space-between;align-items:center;padding:0 4px}
+  .ghead b{font-size:14px;font-weight:600}
+  .ghead span{font-size:11px;color:var(--dim)}
+  .legend{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:10.5px;color:var(--dim);padding:5px 4px 2px}
+  .legend i{display:inline-block;width:14px;height:3px;border-radius:2px;margin-right:5px;vertical-align:3px}
+  .legend i.area{height:9px;vertical-align:0;background:rgba(255,112,67,.55)}
+  .legend i.band{height:9px;vertical-align:0;background:rgba(76,208,125,.18);border:1px dashed rgba(76,208,125,.7)}
+  canvas{display:block;width:100%}
+  .gexp{font-size:11px;color:var(--faint);padding:3px 4px 0;line-height:1.35}
+
+  .ctrls{display:flex;flex-direction:column;gap:8px}
+  .brakebtn{display:flex;align-items:center;justify-content:space-between;border-radius:16px;padding:10px 14px}
+  .brakebtn b{font-size:18px}
+  .brakebtn span{display:block;font-size:12px;color:#4CD07D;margin-top:2px}
+  .toggle{width:64px;height:36px;border-radius:18px;background:#FF7043;position:relative;flex:none;box-shadow:0 0 16px rgba(255,112,67,.7)}
+  .toggle::after{content:"";position:absolute;right:4px;top:4px;width:28px;height:28px;border-radius:50%;background:#fff}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .chip{border:1px solid var(--line);border-radius:999px;padding:6px 12px;font-size:13px;color:var(--dim);white-space:nowrap}
+  .chip.on{background:#123A40;border-color:#1F6E77;color:#7FE3EE;box-shadow:0 0 10px rgba(38,198,218,.35)}
+  .details{display:flex;justify-content:space-between;align-items:center;background:var(--card);border-radius:14px;padding:10px 14px;font-size:14px;color:var(--dim)}
+  .details b{color:var(--txt);font-weight:500}
+  .strip{padding:6px 10px 4px}
+  .strip .sh{display:flex;justify-content:space-between;font-size:11px;color:var(--dim);padding:0 4px 2px}
+
+  /* inner: 3-part layout */
+  .inner .app{display:grid;grid-template-columns:65fr 35fr;grid-template-rows:auto minmax(0,1fr) auto;gap:12px 14px;padding:6px 18px 14px}
+  .inner .title{grid-column:1/3}
+  .inner .gcell{display:flex;min-height:0}
+  .inner .gcell .graph{flex:1 1 auto}
+  .inner .panel{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0}
+  .inner .panel .tiles{grid-template-columns:1fr;flex:1 1 auto;grid-auto-rows:1fr}
+  .inner .panel .tile .v{font-size:26px}
+  .inner .panel .tile{display:grid;grid-template-columns:auto 1fr;grid-template-rows:auto 1fr;column-gap:10px;align-items:center;padding:10px 14px}
+  .inner .panel .tile .k{grid-column:1/3}
+  .inner .panel .tile .sub{min-width:0;text-align:right}
+  .inner .bottom{grid-column:1/3;display:grid;grid-template-columns:1.15fr 1fr;gap:14px;align-items:stretch}
+  .inner .bottom .strip{display:flex;flex-direction:column;justify-content:center}
+  .inner .hero .num{font-size:52px}
+
+  /* notification shade */
+  .shade{padding:10px 12px;display:flex;flex-direction:column;gap:10px}
+  .qs{display:flex;justify-content:space-between;padding:6px 8px 4px}
+  .qs i{width:52px;height:52px;border-radius:18px;background:#22262D;display:block}
+  .qs i.on{background:#2E5E66}
+  .clock{display:flex;justify-content:space-between;align-items:baseline;padding:4px 8px 0;color:#C9CDD3}
+  .clock b{font-size:30px;font-weight:400;color:#E8EAED}
+  .ncard{background:#1E2229;border-radius:22px;padding:12px 14px;box-shadow:0 0 0 1px rgba(var(--g),.35), 0 0 22px rgba(var(--g),.18)}
+  .nh{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}
+  .nh .ai{width:22px;height:22px;border-radius:50%;background:rgba(var(--g),.95);display:grid;place-items:center}
+  .nt{font-size:15px;font-weight:600;margin-top:8px}
+  .nx{font-size:13px;color:#BFC4CB;margin-top:2px}
+  .nact{display:flex;gap:24px;margin-top:10px;font-size:13px;font-weight:600;color:rgb(var(--g))}
+  .sect{font-size:12px;color:var(--dim);padding:2px 8px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const P=new URLSearchParams(location.search);
+const MODE=P.get('screen')||(innerWidth>=600?'inner':'cover');
+const MANUAL=P.has('manual');
+const GAIN=1250, SPEED=4, CYCLE=80, WIN=120, TICK=0.25;   // demo runs at 4x; graph shows last 2 sim-minutes
+
+// ---------- icons ----------
+const boltIcon=(sz,fill)=>`<svg width="${sz}" height="${sz}" viewBox="0 0 24 24"><path fill="${fill}" d="M13.2 2 5.5 13.2h5.6L10.3 22l8.2-11.4h-5.7z"/><path fill="none" stroke="${fill}" stroke-width="1.8" stroke-linecap="round" d="M4.2 7.5a9.3 9.3 0 0 0 0 9M19.8 7.5a9.3 9.3 0 0 1 0 9"/></svg>`;
+const BOLT='M13.2 2 5.5 13.2h5.6L10.3 22l8.2-11.4h-5.7z';
+const stIcon=(k,sz,f)=>{const v={
+  brake:`<path fill="${f}" d="${BOLT}"/><path fill="none" stroke="${f}" stroke-width="1.8" stroke-linecap="round" d="M4.2 7.5a9.3 9.3 0 0 0 0 9M19.8 7.5a9.3 9.3 0 0 1 0 9"/>`,
+  hold:`<path fill="${f}" d="${BOLT}" transform="translate(3 0) scale(.75)"/><rect x="3" y="18.5" width="18" height="2.4" rx="1.2" fill="${f}"/><rect x="3" y="2" width="18" height="2.4" rx="1.2" fill="${f}" opacity=".0"/>`,
+  charge:`<path fill="${f}" d="${BOLT}" transform="translate(-2 0)"/><path fill="none" stroke="${f}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M20 12V4M17 7l3-3 3 3"/>`,
+  paused:`<rect x="6" y="4" width="4" height="16" rx="1.2" fill="${f}"/><rect x="14" y="4" width="4" height="16" rx="1.2" fill="${f}"/>`,
+  off:`<path fill="${f}" d="${BOLT}" opacity=".9"/><path stroke="${f}" stroke-width="2.2" stroke-linecap="round" d="M3.5 3.5l17 17"/>`}[k];
+  return `<svg width="${sz}" height="${sz}" viewBox="0 0 24 24">${v}</svg>`};
+const wifi=`<svg width="15" height="15" viewBox="0 0 24 24"><path fill="#C9CDD3" d="M12 20.5 1.5 8.3a15.9 15.9 0 0 1 21 0z"/></svg>`;
+const batt=`<svg width="22" height="12" viewBox="0 0 26 13"><rect x=".7" y=".7" width="21.6" height="11.6" rx="2.6" fill="none" stroke="#C9CDD3" stroke-width="1.3"/><rect x="2.5" y="2.5" width="11" height="8" rx="1.2" fill="#C9CDD3"/><rect x="23.4" y="4.2" width="2" height="4.6" rx="1" fill="#C9CDD3"/><path d="M12.6 1.8 9 7h2.6l-.9 4.4L14.6 6H12z" fill="#0B0C0F" stroke="#0B0C0F" stroke-width=".4"/></svg>`;
+const sbar=(clock='16:13')=>`<div class="sbar"><div class="l"><span>${clock}</span><span id="sIcon">${stIcon('brake',15,'#E8EAED')}</span></div><div class="r">${wifi}${batt}<span>56%</span></div></div>`;
+
+// ---------- simulation ----------
+let seed=11; const rnd=()=>{seed=(seed*16807)%2147483647; return seed/2147483647-0.5};
+const S={t:-WIN, brake:0.38, raw:-600, ema:-600, fast:-600, mah:2874.0, temp:39.0, plugged:false, usage:0};
+const H=[];  // {t, raw, ema, brake, mah}
+function phase(t){return ((t%CYCLE)+CYCLE)%CYCLE}
+function tick(){
+  const dt=TICK, tc=phase(S.t);
+  S.plugged = tc>=4;
+  S.usage = (tc>=44&&tc<50) ? 1300+160*Math.sin(tc*3) : 0;
+  const surplus = S.plugged ? 520 : -600;
+  const tru = surplus - S.brake*GAIN - S.usage;
+  S.raw = tru + rnd()*170;
+  S.ema += (S.raw-S.ema)*dt/(3+dt);
+  S.fast += (S.raw-S.fast)*dt/(0.8+dt);
+  if(!S.plugged) S.brake=Math.max(0,S.brake-0.8*dt);
+  else if(S.fast<-250) S.brake-=0.09*dt;
+  else if(S.ema>100) S.brake+=0.012*dt*Math.min(3,(S.ema-50)/120);
+  else if(S.ema<-100) S.brake-=0.04*dt;
+  S.brake=Math.max(0,Math.min(0.8,S.brake));
+  S.mah += tru*dt/3600/3.95*8 + (2874-S.mah)*dt/40;   // exaggerated so the hold is visible in a short demo
+  S.temp += ((38.7+S.brake*1.3+(S.usage?0.4:0))-S.temp)*dt/20;
+  S.t+=dt;
+  H.push({t:S.t,raw:S.raw,ema:S.ema,brake:S.brake,mah:S.mah});
+  while(H.length && H[0].t < S.t-WIN-2) H.shift();
+}
+while(S.t<0) tick();   // prefill: previous cycle is visible on the graph at start
+
+function stateOf(){
+  if(!S.plugged) return {k:'off', c:[154,160,166], ic:'⏻', b:'UNPLUGGED', s:'brake idle · plug in to hold the level'};
+  if(S.usage>0||S.fast<-250) return {k:'use', c:[79,163,255], ic:'↓', b:'IN USE', s:'phone is using more than the charger gives'};
+  if(S.ema>150) return {k:'brake', c:[255,112,67], ic:'‖', b:'BRAKING', s:`burning ~${Math.round(S.brake*GAIN/10)*10} mW to pull net to 0`};
+  return {k:'hold', c:[76,208,125], ic:'✓', b:'HOLDING 56%', s:`brake using ~${Math.round(S.brake*GAIN/10)*10} mW`};
+}
+
+// ---------- markup ----------
+const hero=`<div class="hero"><div class="lbl">Net into battery · 3 s average</div>
+  <div class="num"><span id="num">+0</span><small>mW</small></div>
+  <div class="raw" id="raw">raw</div></div>`;
+const banner=`<div class="banner" id="banner"><div class="ic" id="bIc">‖</div><div><b id="bB">BRAKING</b><span id="bS"></span></div></div>`;
+const tile=(id,k,col,v,sub)=>`<div class="tile" id="${id}"><div class="k"><i style="background:${col}"></i>${k}</div><div class="v" id="${id}V">${v}</div><div class="sub">${sub}</div></div>`;
+const tiles=`<div class="tiles">
+  ${tile('batTile','Battery','#4FA3FF','56%',`<div class="s" id="batS">2,874 mAh · target 2,880</div><div class="s" style="color:var(--faint)">source: fuel gauge</div>`)}
+  ${tile('brakeTile','Brake level','#FF7043','0%',`<div class="bar"><div id="brakeBar" style="width:0%"></div></div><div class="s">4 threads · low priority</div>`)}
+  ${tile('surTile','Charger surplus','#FFB300','~0 mW',`<div class="s">net + brake power</div>`)}
+  ${tile('tmpTile','Temperature','#9AA0A6','39.0 °C',`<div class="bar"><div id="tmpBar" style="width:70%;background:linear-gradient(90deg,#4CD07D,#FFB300)"></div></div><div class="s">cutoff 45 °C</div>`)}
+</div>`;
+const graph=(exp)=>`<div class="card graph glow" id="gcard">
+  <div class="ghead"><b>Power · last 2 min</b><span class="live" id="live2"><i></i>LIVE</span></div>
+  <div class="legend"><span><i style="background:#fff"></i>net mW (left)</span><span><i style="background:rgba(255,255,255,.35)"></i>raw</span><span><i class="area"></i>brake % (right)</span><span><i class="band"></i>target ±100 mW</span></div>
+  <canvas id="gc"></canvas>${exp?`<div class="gexp">Above the band = battery charging, so the brake rises. Below = phone uses more than the charger gives, so the brake backs off.</div>`:''}</div>`;
+const strip=`<div class="card strip"><div class="sh"><span>Charge (mAh)</span><span id="stripNow">now 2,874 mAh · 56%</span></div><canvas id="sc"></canvas></div>`;
+const ctrls=`<div class="ctrls">
+  <div class="brakebtn glow"><div><b>Brake ON</b><span>☀ Screen stays on while plugged</span></div><div class="toggle"></div></div>
+  <div class="row"><span class="chip on">● Hold current (56%)</span><span class="chip">Target %</span></div>
+  <div class="details"><span><b>Details</b> · cutoffs, mode, sensor, log</span><span>▾</span></div></div>`;
+const title=`<div class="title"><span>CHARGE BRAKE</span><span class="r"><span class="ex">mockup · demo 4× speed</span><span class="live" id="live1"><i></i>LIVE</span></span></div>`;
+
+const root=document.getElementById('root');
+if(MODE==='cover'){
+  root.innerHTML=`<div class="screen cover">${sbar()}<div class="app">${title}${hero}${banner}${tiles}${graph(false)}${strip}${ctrls}</div></div>`;
+} else if(MODE==='inner'){
+  root.innerHTML=`<div class="screen inner">${sbar()}<div class="app">${title}
+    <div class="gcell">${graph(true)}</div>
+    <div class="panel">${hero}${banner}${tiles}</div>
+    <div class="bottom">${strip}${ctrls}</div></div></div>`;
+} else if(MODE==='notif'){
+  root.innerHTML=`<div class="screen">${sbar()}<div class="shade">
+    <div class="clock"><b>16:13</b><span>Sun, 18 Oct</span></div>
+    <div class="qs"><i class="on"></i><i class="on"></i><i></i><i></i><i class="on"></i></div>
+    <div class="sect">Silent</div>
+    <div class="ncard">
+      <div class="nh"><span class="ai">${boltIcon(14,'#111')}</span><span>Charge Brake · now</span><span style="margin-left:auto">▾</span></div>
+      <div class="nt">Braking 38% · holding 56%</div>
+      <div class="nx">+42 mW net · charger surplus ~460 mW · 39.2 °C</div>
+      <div class="bar" style="margin-top:8px;height:6px"><div style="width:38%;background:rgb(var(--g));box-shadow:0 0 8px rgb(var(--g))"></div></div>
+      <div class="nact"><span>PAUSE</span><span>STOP</span><span>OPEN</span></div>
+    </div>
+    <div class="sect">Status bar icon by state (Android shows it white; the shape changes)</div>
+    <div class="row" style="padding:0 8px;gap:6px 14px;font-size:12px;color:var(--dim)">
+      ${[['brake','Braking'],['hold','Holding'],['charge','Charging up'],['paused','Paused'],['off','Off']].map(([k,l])=>`<span style="display:flex;align-items:center;gap:5px">${stIcon(k,16,'#E8EAED')}${l}</span>`).join('')}
+    </div>
+    <div class="sect" style="color:var(--faint)">State colour shows in the app and in this expanded card (accent colour).</div></div></div>`;
+  document.documentElement.style.setProperty('--g','255,112,67');
+}
+
+// ---------- rendering ----------
+const $=id=>document.getElementById(id);
+const cur={g:[255,112,67], n:[76,208,125], num:S.ema, brake:S.brake, sur:520, temp:S.temp, bk:0};
+const lerp=(a,b,k)=>a+(b-a)*k;
+function numColor(v){ return v>150?[255,179,0]: v<-150?[79,163,255]:[76,208,125]; }
+let gc,gx,sc,sx,DPR=devicePixelRatio||1;
+function setupCanvas(id,h){
+  const c=$(id); if(!c) return [null,null];
+  const w=c.clientWidth; const hh=h||c.parentElement.clientHeight - c.offsetTop + c.parentElement.offsetTop - 8;
+  c.style.height=hh+'px'; c.width=Math.round(w*DPR); c.height=Math.round(hh*DPR);
+  const x=c.getContext('2d'); x.scale(DPR,DPR); return [c,x];
+}
+function layout(){
+  if(MODE==='notif') return;
+  if(MODE==='cover'){ [gc,gx]=setupCanvas('gc',150); [sc,sx]=setupCanvas('sc',50); }
+  else {
+    [sc,sx]=setupCanvas('sc',96);
+    const card=$('gcard'), c=$('gc'); const exp=card.querySelector('.gexp');
+    const h=card.getBoundingClientRect().bottom - c.getBoundingClientRect().top - (exp?exp.offsetHeight:0) - 10;
+    [gc,gx]=setupCanvas('gc',h);
+  }
+}
+function drawGraph(simNow){
+  if(!gx) return;
+  const w=gc.clientWidth, h=parseFloat(gc.style.height);
+  const L=40,R=34,T=8,B=18,W=w-L-R,HH=h-T-B, lo=-1500, hi=900;
+  const X=t=>L+(t-(simNow-WIN))/WIN*W, Y=v=>T+(hi-v)/(hi-lo)*HH, YB=b=>T+HH-b*HH;
+  gx.clearRect(0,0,w,h);
+  gx.font='10px Roboto, sans-serif'; gx.textBaseline='middle';
+  for(const v of [-1500,-1000,-500,0,500]){ gx.strokeStyle=v?'#22262D':'#454B55'; gx.lineWidth=1; gx.beginPath(); gx.moveTo(L,Y(v)); gx.lineTo(L+W,Y(v)); gx.stroke();
+    gx.fillStyle='#8E949E'; gx.textAlign='right'; gx.fillText((v>0?'+':'')+v,L-5,Y(v)); }
+  gx.textAlign='left'; gx.fillStyle='#C9785F'; for(const p of [0,50,100]) gx.fillText(p+'%',L+W+5,YB(p/100));
+  gx.save(); gx.beginPath(); gx.rect(L,T-2,W,HH+4); gx.clip();
+  // brake area
+  gx.beginPath(); gx.moveTo(X(H[0].t),YB(0)); for(const p of H) gx.lineTo(X(p.t),YB(p.brake)); gx.lineTo(X(H[H.length-1].t),YB(0)); gx.closePath();
+  const gr=gx.createLinearGradient(0,T,0,T+HH); gr.addColorStop(0,'rgba(255,112,67,.45)'); gr.addColorStop(1,'rgba(255,112,67,.10)'); gx.fillStyle=gr; gx.fill();
+  gx.strokeStyle='rgba(255,112,67,.8)'; gx.lineWidth=1; gx.beginPath(); H.forEach((p,i)=>i?gx.lineTo(X(p.t),YB(p.brake)):gx.moveTo(X(p.t),YB(p.brake))); gx.stroke();
+  // band
+  gx.fillStyle='rgba(76,208,125,.12)'; gx.fillRect(L,Y(100),W,Y(-100)-Y(100));
+  gx.setLineDash([5,4]); gx.strokeStyle='rgba(76,208,125,.7)'; for(const v of [100,-100]){gx.beginPath();gx.moveTo(L,Y(v));gx.lineTo(L+W,Y(v));gx.stroke();} gx.setLineDash([]);
+  // raw + ema
+  gx.strokeStyle='rgba(255,255,255,.28)'; gx.lineWidth=1; gx.beginPath(); H.forEach((p,i)=>i?gx.lineTo(X(p.t),Y(p.raw)):gx.moveTo(X(p.t),Y(p.raw))); gx.stroke();
+  gx.shadowColor=`rgba(${cur.g.map(Math.round)},.9)`; gx.shadowBlur=10; gx.strokeStyle='#fff'; gx.lineWidth=2.2; gx.lineJoin='round';
+  gx.beginPath(); H.forEach((p,i)=>i?gx.lineTo(X(p.t),Y(p.ema)):gx.moveTo(X(p.t),Y(p.ema))); gx.stroke(); gx.shadowBlur=0;
+  gx.restore();
+  // live head
+  const last=H[H.length-1], pulse=0.5+0.5*Math.sin(simNow/SPEED*Math.PI*2);
+  gx.fillStyle=`rgba(${cur.n.map(Math.round)},${0.25+0.25*pulse})`; gx.beginPath(); gx.arc(X(last.t),Y(last.ema),5+5*pulse,0,7); gx.fill();
+  gx.fillStyle=`rgb(${cur.n.map(Math.round)})`; gx.beginPath(); gx.arc(X(last.t),Y(last.ema),3.5,0,7); gx.fill();
+  gx.fillStyle='#8E949E'; gx.textAlign='left'; gx.fillText('−2 min',L,h-7); gx.textAlign='center'; gx.fillText('−1',L+W/2,h-7); gx.textAlign='right'; gx.fillText('now',L+W,h-7);
+}
+function drawStrip(simNow){
+  if(!sx) return;
+  const w=sc.clientWidth, h=parseFloat(sc.style.height), L=40,R=34,T=6,B=6,W=w-L-R,HH=h-T-B, lo=2868, hi=2882;
+  const X=t=>L+(t-(simNow-WIN))/WIN*W, Y=v=>T+(hi-v)/(hi-lo)*HH;
+  sx.clearRect(0,0,w,h); sx.font='10px Roboto, sans-serif'; sx.textBaseline='middle';
+  sx.setLineDash([5,4]); sx.strokeStyle='#4FA3FF'; sx.beginPath(); sx.moveTo(L,Y(2880)); sx.lineTo(L+W,Y(2880)); sx.stroke(); sx.setLineDash([]);
+  sx.fillStyle='#7DB8FF'; sx.textAlign='left'; sx.fillText('target 2,880 (60%)',L+4,Y(2880)-7); 
+  sx.fillStyle='#8E949E'; sx.textAlign='right'; sx.fillText('2,880',L-5,Y(2880)); sx.fillText('2,870',L-5,Y(2870)); sx.fillText('',0,0);
+  sx.save(); sx.beginPath(); sx.rect(L,0,W,h); sx.clip();
+  sx.shadowColor='#4FA3FF'; sx.shadowBlur=6; sx.strokeStyle='#4FA3FF'; sx.lineWidth=2; sx.beginPath(); H.forEach((p,i)=>i?sx.lineTo(X(p.t),Y(p.mah)):sx.moveTo(X(p.t),Y(p.mah))); sx.stroke(); sx.restore();
+}
+const fmt=n=>Math.round(n).toLocaleString('en-US');
+function render(dtReal, simNow){
+  const st=MODE==='notif'?{c:[255,112,67]}:stateOf(); const k=1-Math.exp(-dtReal/0.35), k2=1-Math.exp(-dtReal/0.6);
+  cur.g=cur.g.map((v,i)=>lerp(v,st.c[i],k2)); cur.num=lerp(cur.num,S.ema,k); cur.n=cur.n.map((v,i)=>lerp(v,numColor(cur.num)[i],k2));
+  cur.brake=lerp(cur.brake,S.brake,k); cur.sur=lerp(cur.sur,S.ema+S.brake*GAIN,k*0.5); cur.temp=lerp(cur.temp,S.temp,k);
+  const rs=document.documentElement.style; rs.setProperty('--g',cur.g.map(Math.round).join(',')); rs.setProperty('--n',cur.n.map(Math.round).join(','));
+  const pulse=0.5+0.5*Math.sin(simNow/SPEED*Math.PI*2*1.0);
+  for(const id of ['live1','live2']){const e=$(id); if(e){e.style.opacity=(0.35+0.65*pulse).toFixed(2);} }
+  if(MODE==='notif') return;
+  $('num').textContent=(cur.num>=0?'+':'−')+fmt(Math.abs(cur.num));
+  const ma=S.raw/3.962;
+  $('raw').textContent=`raw ${S.raw>=0?'+':'−'}${fmt(Math.abs(S.raw))} mW · ${ma>=0?'+':'−'}${fmt(Math.abs(ma))} mA · 3.962 V`;
+  const sk={brake:'brake',hold:'hold',use:'hold',off:'off'}[st.k]; if($('sIcon').dataset.k!==sk){$('sIcon').dataset.k=sk; $('sIcon').innerHTML=stIcon(sk,15,'#E8EAED');}
+  $('bIc').textContent=st.ic; $('bB').textContent=st.b; $('bS').textContent=st.s;
+  $('bIc').style.boxShadow=`0 0 ${8+12*pulse}px rgba(var(--g),.8)`;
+  $('brakeTileV').textContent=Math.round(cur.brake*100)+'%'; $('brakeBar').style.width=(cur.brake*100).toFixed(1)+'%';
+  document.documentElement.style.setProperty('--bk',(cur.brake/0.8*0.6).toFixed(3));
+  $('surTileV').textContent=S.plugged?`~${fmt(Math.max(0,cur.sur))} mW`:'— mW';
+  $('tmpTileV').textContent=cur.temp.toFixed(1)+' °C'; $('tmpBar').style.width=((cur.temp-25)/20*100).toFixed(1)+'%';
+  $('batS').textContent=`${fmt(S.mah)} mAh · target 2,880`; $('stripNow').textContent=`now ${fmt(S.mah)} mAh · 56%`;
+  drawGraph(simNow); drawStrip(simNow);
+}
+// smooth scrolling: sim ticks at 0.25 s; graph x uses continuous time
+let simNow=0;
+function advance(dtReal){
+  simNow+=dtReal*SPEED;
+  while(S.t < simNow) tick();
+  render(dtReal, simNow);
+}
+window.__advance=advance;
+layout(); render(1, 0);
+if(MANUAL){ window.__seek=(sec)=>{ let n=Math.round(sec*30); for(let i=0;i<n;i++) advance(1/30); }; }
+else { let last=performance.now(); const loop=n=>{ advance(Math.min(0.1,(n-last)/1000)); last=n; requestAnimationFrame(loop); }; requestAnimationFrame(loop); }
+</script>
+</body>
+</html>

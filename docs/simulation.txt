@@ -1,11 +1,14 @@
-=== Charge Brake controller simulation (true net power, after first 10 min) ===
-base: +400mW, gain 1.2W, 1s sensor net mean    +28 mW  sd   121  burn 31.0% (sd 10.1)  level 60-61%  settle   87s  jitter/60s 0.9%  big burn reversals/h 2
-weak burn gain 0.6W                net mean    +23 mW  sd    87  burn 62.9% (sd 14.4)  level 60-61%  settle  144s  jitter/60s 0.8%  big burn reversals/h 0
-strong burn gain 3W                net mean    +18 mW  sd   128  burn 12.7% (sd  4.3)  level 60-61%  settle   30s  jitter/60s 0.3%  big burn reversals/h 2
-laggy sensor (5s avg, 2s update)   net mean    +22 mW  sd   126  burn 31.5% (sd 10.5)  level 60-61%  settle   71s  jitter/60s 1.5%  big burn reversals/h 6
-bigger surplus +800mW              net mean    +28 mW  sd   122  burn 64.3% (sd 10.2)  level 60-61%  settle  119s  jitter/60s 0.9%  big burn reversals/h 2
-surplus +1000mW > max burn (info)  net mean    +52 mW  sd    30  burn 79.0% (sd  2.5)  level 60-62%  settle  121s  jitter/60s 0.0%
-start 59.6%, target 60%            max burn below target 0%, reached 60% after 10 min, then held at 61%
-fast charger 10W                   latched off after 5.8s, burn after latch 0%
-random usage spikes 0.3-1.5W       net mean    +27 mW  sd   243  burn 23.8% (sd 12.9)  level 60-61%  settle   72s  jitter/60s 3.8%  backoff to <20% in median 2.5s (n=32)
-% mode (backup), 6h, spikes        net mean     -1 mW  sd   441  burn 20.3% (sd 19.9)  level 60-61%  settle   30s  jitter/60s 5.3%
+=== Charge Brake v0.2 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===
+field: surplus +700 mW, gain 1.2 W   net    +0 mW (sd   66) | burn 58.3% jitter  3.9% | level 60-60% | mAh err max   1.4 end  +0.5 | in-use trig 1
+weak burn gain 0.8 W                 net   -11 mW (sd   66) | burn 63.9% jitter  4.5% | level 60-60% | mAh err max   7.4 end  +0.6 | in-use trig 2
+strong burn gain 3 W                 net    +1 mW (sd  125) | burn 23.3% jitter  3.4% | level 60-60% | mAh err max   1.5 end  +1.0 | in-use trig 12
+surplus +300 mW                      net    -2 mW (sd   63) | burn 25.1% jitter  3.7% | level 60-60% | mAh err max   1.2 end  +0.0 | in-use trig 3
+lag: 2 s sensor period               net    -3 mW (sd  154) | burn 58.6% jitter  9.2% | level 60-60% | mAh err max   2.6 end  +0.3 | in-use trig 20
+start 57.5%, target 60%              net   +11 mW (sd   77) | burn 57.4% jitter  3.7% | level 60-60% | mAh err max   8.8 end  +0.0 | in-use trig 2 | burn below target 0%, reached after 41 min
+zero filter: [500, 0, 520, 0, 0, 0, 480] -> [500, 500, 520, 520, 0, 0, 480]
+no fuel gauge -> coulomb counting    net    -3 mW (sd   72) | burn 58.6% jitter  3.9% | level 60-60% | mAh err max   1.9 end  -1.2 | in-use trig 5
+no mW reading -> % fallback (6 h)    net    -0 mW (sd  154) | burn 58.3% jitter  7.0% | level 60-61% | mAh err max  24.8 end +24.0 | in-use trig 0
+15 W fast charger                    off at 9, 139, 268, 398, 527 s, burn while off 0%
+5 W surge (field charger)            tripped: false
+15 W + Ignore                        burn after Ignore 80%
+random use 0.5-2 W, 5-55 s           net    -1 mW (sd  307) | burn 47.3% jitter  9.1% | level 60-60% | mAh err max   3.8 end  +0.7 | in-use trig 54 | back-off to 30% in median 4.5 s (n=40)
