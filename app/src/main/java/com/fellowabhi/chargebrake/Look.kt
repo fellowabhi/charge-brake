@@ -25,7 +25,7 @@ fun lerpColor(a: Int, b: Int, k: Float): Int {
 }
 fun withAlpha(c: Int, a: Float) = (c and 0xFFFFFF) or ((a.coerceIn(0f, 1f) * 255).roundToInt() shl 24)
 
-fun numColor(mw: Float) = when { mw > 150f -> C_AMBER; mw < -150f -> C_BLUE; else -> C_GREEN }
+fun numColor(mw: Float) = when { mw > 100f -> C_AMBER; mw < -100f -> C_BLUE; else -> C_GREEN }
 
 fun fmtInt(v: Float) = String.format(Locale.US, "%,d", v.roundToInt())
 fun fmtSigned(v: Float) = (if (v >= 0) "+" else "−") + fmtInt(abs(v))

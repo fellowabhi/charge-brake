@@ -19,15 +19,32 @@ import kotlin.math.abs
 
 /** Samples the battery every 250 ms, runs the controller when enabled, keeps history + CSV log. */
 object Monitor {
-    const val VERSION = "0.3"
-    const val VERSION_CODE = 3
+    const val VERSION = "0.4"
+    const val VERSION_CODE = 4
     const val TICK_MS = 250L
     val cfg = Cfg()
     val ctl = Controller(cfg)
     val burner = Burner()
     val mahT = MahTracker()
-    val hist = History(1200)                 // 5 min @ 250 ms
-    val lhist = ChargeHistory(5400)          // 3 h @ 2 s (charge graph)
+    val hist = History(14_400)               // 1 h @ 250 ms
+    val lhist = ChargeHistory(3_900)         // ~1 h @ 1 s (charge graph)
+    val smooth = MahSmoother()               // charge graph: gauge steps interpolated with the live current
+    // linked time span of both graphs
+    val SPANS = longArrayOf(60_000L, 120_000L, 300_000L, 900_000L, 3_600_000L)
+    var spanMs = 120_000L
+    fun nextSpan() { val k = SPANS.indexOf(spanMs); spanMs = SPANS[(k + 1) % SPANS.size]; prefs.edit().putLong("span", spanMs).apply() }
+    fun spanLabel(ms: Long = spanMs) = if (ms >= 3_600_000L) "${ms / 3_600_000L} h" else "${ms / 60_000L} min"
+    // UI prefs
+    var live = false; private set           // main screen: false = Eco view (default), true = Live (smooth, screen on)
+    fun setLive(on: Boolean) { live = on; prefs.edit().putBoolean("live", on).apply(); event("view ${if (on) "live" else "eco"}") }
+    var bubble = false; private set
+    fun setBubble(on: Boolean) { bubble = on; prefs.edit().putBoolean("bubble", on).apply(); event("bubble $on") }
+    val p: SharedPreferences get() = prefs
+    // own UI cost estimate: which UI is showing (set by MainActivity)
+    @Volatile var uiMode = UI_NONE
+    const val UI_NONE = 0; const val UI_ECO = 1; const val UI_LIVE = 2
+    val cost = UiCost()
+    private var pm: android.os.PowerManager? = null
     const val AVG_S = 1.5f                   // display smoothing of the big number / white line
     private val log = ArrayDeque<String>()   // 1 Hz rows + events, last ~4 h
     private const val LOG_CAP = 15_000
@@ -82,6 +99,7 @@ object Monitor {
         app = c.applicationContext
         bm = app.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
         prefs = app.getSharedPreferences("cb", Context.MODE_PRIVATE)
+        pm = app.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
         powerProfileMah(app)?.let { ratedMah = it; ratedSrc = "PowerProfile" }
         with(prefs) {
             cfg.mode = getInt("mode", Mode.AUTO); cfg.holdCurrent = getBoolean("holdCur", true)
@@ -93,6 +111,8 @@ object Monitor {
             unitUa = getBoolean("ua", false); unitKnown = getBoolean("uaKnown", false)
             flip = getBoolean("flip", false); signKnown = getBoolean("signKnown", false)
             ctl.holdPct = getInt("hold", -1); ctl.holdMah = getFloat("holdMah", Float.NaN); holdSrc = getString("holdSrc", "") ?: ""; useBase = getFloat("useBase", Float.NaN)
+            spanMs = getLong("span", 120_000L).takeIf { it in SPANS } ?: 120_000L
+            live = getBoolean("live", false); bubble = getBoolean("bubble", false)
         }
         cfg.burnMwFull = 1500f * threads / 4f
         t0 = SystemClock.elapsedRealtime()
@@ -233,6 +253,8 @@ object Monitor {
         if (mahT.update(now, chargeCounter, mA, mwOk, pct, cfg.capacityMah) && enabled) {
             ctl.rebase(pct, mahT.mah); event("mAh source -> ${mahT.source}")
         }
+        val shift = smooth.update(dt, mahT.mah, mahT.source, mA, mwOk)
+        if (shift != 0f) lhist.shift(shift)   // source switch: move the old curve so the graph has no jump
 
         var b = 0f
         if (enabled) {
@@ -241,8 +263,11 @@ object Monitor {
             if (ctl.holdMah.toBits() != savedHoldMah.toBits()) { savedHoldMah = ctl.holdMah; holdSrc = mahT.source; save() }
         }
         hist.add(now, mW, avgMw, b, if (enabled) ctl.tgtMw else 0f, pct, mahT.mah, if (enabled) ctl.targetMah else Float.NaN)
-        if (now - lastL >= 2000) { lastL = now; lhist.add(now, mahT.mah, if (enabled) ctl.targetMah else Float.NaN, pct, state) }
-        if (now - lastLog >= 1000) { lastLog = now; updateDrift(); addLog(now, b, "") }
+        if (now - lastL >= 1000) { lastL = now; lhist.add(now, smooth.value, if (enabled) ctl.targetMah else Float.NaN, pct, state, avgMw) }
+        if (now - lastLog >= 1000) {
+            lastLog = now; updateDrift(); addLog(now, b, "")
+            if (mwOk) cost.add(uiMode, pm?.isInteractive == true, plugged != 0, mW + burnMw, 1f)
+        }
     }
 
     /** Phone use (est.): unplugged = −net. Plugged = charger estimate − net − brake, where the charger estimate is
@@ -275,18 +300,18 @@ object Monitor {
     private fun updateDrift() { if (!holdingNow) drift.reset() else if (mwOk) drift.add(mW, volt, cfg.capacityMah, ctl.burn, cfg.maxBurn) }
 
     private val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-    private const val COLS = "time,elapsed_s,event,raw_current_now,raw_current_avg,mA,V,mW,avg_mW,phone_use_est_mW,ema_mW,ema_use_mW,target_mW,burn,pct,mAh,target_mAh,mAh_source,charge_counter,temp_C,plugged,status,state,enabled,paused,hold_pct,mode,eff_mode,hold_mode,target_pct,temp_cutoff,fast_cutoff_mW,fast_avg_mW,aggr,max_burn,threads,capacity,sensor_hz,mw_ok,unit_ua,flip,invert,drain_speed,hold_drift_mW,hold_min_per_pct"
+    private const val COLS = "time,elapsed_s,event,raw_current_now,raw_current_avg,mA,V,mW,avg_mW,phone_use_est_mW,ema_mW,ema_use_mW,target_mW,burn,pct,mAh,target_mAh,mAh_source,charge_counter,temp_C,plugged,status,state,enabled,paused,hold_pct,mode,eff_mode,hold_mode,target_pct,temp_cutoff,fast_cutoff_mW,fast_avg_mW,aggr,max_burn,threads,capacity,sensor_hz,mw_ok,unit_ua,flip,invert,drain_speed,hold_drift_mW,hold_min_per_pct,ui_mode,graph_mAh"
 
     fun event(e: String) { h?.post { addLog(SystemClock.elapsedRealtime(), ctl.burn, e) } ?: addLog(SystemClock.elapsedRealtime(), ctl.burn, e) }
 
     private fun addLog(now: Long, b: Float, ev: String) {
         val row = String.format(Locale.US,
-            "%s,%.1f,%s,%d,%d,%.1f,%.3f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%d,%.1f,%.1f,%s,%d,%.1f,%d,%d,%s,%b,%b,%d,%s,%s,%s,%d,%.1f,%d,%.0f,%d,%.2f,%d,%.0f,%.2f,%b,%b,%b,%b,%s,%.0f,%.0f",
+            "%s,%.1f,%s,%d,%d,%.1f,%.3f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%d,%.1f,%.1f,%s,%d,%.1f,%d,%d,%s,%b,%b,%d,%s,%s,%s,%d,%.1f,%d,%.0f,%d,%.2f,%d,%.0f,%.2f,%b,%b,%b,%b,%s,%.0f,%.0f,%s,%.2f",
             df.format(Date()), (now - t0) / 1000f, ev.replace(',', ';'), raw, rawAvg, mA, volt, mW, avgMw, phoneUse, ctl.emaSlow, ctl.emaUse, ctl.tgtMw, b, pct,
             mahT.mah, ctl.targetMah, mahT.source, chargeCounter, temp, plugged, status, state.name, enabled, ctl.paused, ctl.hold(),
             Mode.name(cfg.mode), Mode.name(ctl.effMode), if (cfg.holdCurrent) "current" else "target", cfg.targetPct, cfg.tempCutoffC,
             cfg.fastCutoffMw, ctl.fastMw, cfg.aggr, cfg.maxBurn, burner.threads, cfg.capacityMah, rateHz, mwOk,
-            unitUa || maxAbs > 15_000, flip, invert, Drain.name(cfg.drainSpeed), driftMw, minPerPct)
+            unitUa || maxAbs > 15_000, flip, invert, Drain.name(cfg.drainSpeed), driftMw, minPerPct, when (uiMode) { UI_ECO -> "eco"; UI_LIVE -> "live"; else -> "bg" }, smooth.value)
         synchronized(log) { log.addLast(row); if (log.size > LOG_CAP) log.removeFirst() }
     }
 

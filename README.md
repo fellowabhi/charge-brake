@@ -4,6 +4,14 @@ Android app that holds your battery level on a slow charger, without root.
 It reads live battery power and, when the phone is gaining charge, adds just enough
 low-priority CPU load ("brake") to keep net power around 0. No ads, no analytics, no internet permission.
 
+**v0.4**
+- **Floating bubble** over other apps ("Display over other apps" permission, asked on first use). Toggle in the app or from the notification. Outer ring = net power (blue ← green → amber scale, ticks at the ±100 mW holding band), inner ring = brake. Tap = small / expanded pill (remembered); the pill shows net, state, the target (Hold 60% · 2,916 mAh, or 54% → 56% · 97 mAh to go while charging up / draining), brake, temperature, hold quality and a 30 s sparkline. Drag to move, snaps to the nearest side (remembered); long-press or tap the pill text to open the app. Soft green halo + ✓ when the hold is healthy. ~1 Hz values, ~400 ms easing, then idle; paused while the screen is off. Runs from the brake service (shown while Brake is on).
+- **Eco view** (default): ~3 Hz updates, no pulse/glow loops, normal screen timeout. Tap LIVE/ECO to switch to Live (every-frame updates, screen on while plugged).
+- **Charge graph**: smooth line (fuel gauge interpolated with the live current), no jumps when the mAh source switches (old curve is shifted), auto-zoom on the visible data (a far target is pinned at the edge with ↑/↓), coloured by the measured net (green ±100 mW, amber gaining, blue draining).
+- **Linked time span**: tap either graph: 1 / 2 / 5 / 15 min / 1 h for both (remembered). Power history now 1 h.
+- **Details → App's own power (estimate)**: net + brake with the main screen in front (Eco / Live) vs. in the background (screen on), 10 min averages.
+- CSV: `ui_mode`, `graph_mAh` columns.
+
 **v0.3**
 - Tiles never clip (2×2 grid, auto-size values, scrolls instead of squashing); checked at cover, inner (landscape/portrait) and split-screen sizes.
 - Power graph ≈ 50 % of the screen height; new **Charge graph** (mAh from the fuel gauge or counted) with the hold/target line: climbs to the target when charging up, flat on it when holding.
@@ -29,7 +37,7 @@ low-priority CPU load ("brake") to keep net power around 0. No ads, no analytics
 ## Build
 ```
 . ~/android-env.sh
-./gradlew testReleaseUnitTest   # controller simulation (see docs/simulation.txt)
+./gradlew testReleaseUnitTest   # controller simulation + signal tests (see docs/simulation.txt)
 ./gradlew assembleRelease       # app/build/outputs/apk/release/app-release.apk
 ```
 Native Kotlin, plain framework Views, no dependencies. minSdk 26.

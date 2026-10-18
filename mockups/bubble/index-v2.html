@@ -1,0 +1,213 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Charge Brake · floating bubble v2</title>
+<meta name="viewport" content="width=360">
+<style>html,body{margin:0;background:#000;} canvas{display:block;width:360px;height:850px;}</style></head>
+<body><canvas id="c"></canvas>
+<script>
+// ---------------------------------------------------------------------------
+// Charge Brake floating bubble v2: option 1 (dual rings) + option 5 (tap -> pill),
+// option-6 colour scale for the net ring, head glow, intensity lighting, healthy-hold cue.
+// Render model (cheap): values update at ~1 Hz, each change eases over ~400 ms;
+// everything is simple arcs + text, and ALL glow goes into ONE offscreen layer that is
+// blurred once per frame and added on top ('lighter').  ?manual=1 -> __advance(dt) / __seek(t)
+// ---------------------------------------------------------------------------
+const W=360, H=850, DPR=window.devicePixelRatio||1;
+const cv=document.getElementById('c'); cv.width=Math.round(W*DPR); cv.height=Math.round(H*DPR);
+const g=cv.getContext('2d');
+const glc=document.createElement('canvas'); glc.width=cv.width; glc.height=cv.height; const gl=glc.getContext('2d');
+const FONT='Roboto, Inter, "Noto Sans", sans-serif', TAU=Math.PI*2, TOP=-Math.PI/2;
+const C={amber:'#FFB300',orange:'#FF7043',green:'#4CD07D',blue:'#4FA3FF',purple:'#B388FF',grey:'#9AA0A6',red:'#EF5350'};
+const hex=c=>{const n=parseInt(c.slice(1),16);return[n>>16&255,n>>8&255,n&255]};
+const rgb=(a,al=1)=>`rgba(${a[0]|0},${a[1]|0},${a[2]|0},${al})`;
+const mix=(a,b,k)=>[a[0]+(b[0]-a[0])*k,a[1]+(b[1]-a[1])*k,a[2]+(b[2]-a[2])*k];
+const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
+const BLUE=hex(C.blue), GREEN=hex(C.green), AMBER=hex(C.amber), ORANGE=hex(C.orange);
+// option-6 scale: −2 W blue · 0 green · +2 W amber (green plateau inside the ±150 mW band)
+function netScale(v){ const a=Math.abs(v); if(a<=150) return GREEN; const k=clamp((a-150)/1850); return mix(GREEN, v>0?AMBER:BLUE, Math.pow(k,0.7)); }
+
+// ---------------- dummy timeline (20 s loop) ----------------
+const KEYS=[ // t, net mW, brake
+ [0,200,0],[0.8,250,0],[1.4,3900,0],[2.5,3600,0.15],[5.5,1900,0.80],[6.4,1700,1.0],[8.2,1500,1.0],   // surge -> braking -> extreme (brake maxed, still +1.5 W)
+ [9.0,120,0.86],[9.6,30,0.74],[12.0,10,0.70],                                                       // healthy hold
+ [12.5,-1300,0.62],[13.2,-1050,0.12],[14.0,-600,0.05],[14.6,250,0.30],[15.2,40,0.68],               // dip + recovery
+ [15.8,-250,0.85],[16.4,-420,0.95],[17.6,-400,0.95],[18.4,-60,0.72],[20,0,0.70] ];                  // drain -> hold
+const PH=[[0,'Plugged in','charging'],[1.2,'Plug-in surge','charging'],[2.5,'Braking','braking'],[6.2,'Extreme: brake maxed, charger still ahead','braking'],
+ [8.6,'Healthy hold 60%','holding'],[12.2,'Phone in use (dip)','inuse'],[14.4,'Recovering','braking'],[15.6,'Draining to 59%','draining'],[18.3,'Healthy hold 59%','holding']];
+const ST={charging:{col:C.amber,name:'Charging'},braking:{col:C.orange,name:'Braking'},holding:{col:C.green,name:'Holding'},inuse:{col:C.blue,name:'In use'},draining:{col:C.purple,name:'Draining'}};
+const wrap=t=>((t%20)+20)%20;
+function interp(t){t=wrap(t);let i=0;while(i<KEYS.length-2&&KEYS[i+1][0]<=t)i++;const a=KEYS[i],b=KEYS[i+1],k=(t-a[0])/(b[0]-a[0]),e=k*k*(3-2*k);return{net:a[1]+(b[1]-a[1])*e,brake:a[2]+(b[2]-a[2])*e}}
+function phase(t){t=wrap(t);let p=PH[0];for(const q of PH)if(t>=q[0])p=q;return p}
+const TAPS=[5.0,15.0];   // simulated taps on the live bubble (toggle, then the mode stays)
+
+// ---------------- state: 1 Hz samples, ~400 ms easing ----------------
+const S={t:0,lastSample:-1,tNet:0,tBrake:0,net:200,brake:0,pNetF:0,pBrake:0,netV:0,brakeV:0,
+  netCol:GREEN,stCol:hex(C.amber),state:'charging',label:'',pct:60,hold:60,temp:37,healthy:0,intensity:0,
+  hist:[],expanded:false,morph:0,ripple:-1,toast:-9,tapped:new Set()};
+function step(dt){
+  S.t+=dt; const tt=wrap(S.t);
+  if (Math.floor(S.t) !== S.lastSample){ S.lastSample=Math.floor(S.t);              // new value once per second
+    const v=interp(S.t); S.tNet=v.net+Math.sin(S.t*2.3)*35; S.tBrake=v.brake; S.hist.push(S.tNet); if(S.hist.length>30)S.hist.shift(); }
+  const ph=phase(S.t); S.state=ph[2]; S.label=ph[1];
+  const k=1-Math.exp(-dt/0.13);                                                       // ~400 ms to settle
+  const pn=S.net, pb=S.brake;
+  S.net+=(S.tNet-S.net)*k; S.brake+=(S.tBrake-S.brake)*k;
+  S.netV=Math.abs(netFrac(S.net)-netFrac(pn))/Math.max(dt,1e-4); S.brakeV=Math.abs(S.brake-pb)/Math.max(dt,1e-4);
+  const kc=1-Math.exp(-dt/0.5);
+  S.netCol=mix(S.netCol,netScale(S.net),kc); S.stCol=mix(S.stCol,hex(ST[S.state].col),kc);
+  const healthyNow = S.state==='holding' && Math.abs(S.net)<150;
+  S.healthy+=((healthyNow?1:0)-S.healthy)*(1-Math.exp(-dt/0.6));
+  // intensity: calm near normal, stronger toward extremes (large |net| or brake near 100 %)
+  const ext=Math.max(clamp((Math.abs(S.net)-300)/2700), clamp((S.brake-0.75)/0.25));
+  S.intensity+=(Math.pow(ext,1.3)-S.intensity)*(1-Math.exp(-dt/0.4));
+  S.hold=tt>=15.6?59:60; S.pct=tt>=17.4?59:60; S.temp+=((36.6+S.brake*3.4)-S.temp)*(1-Math.exp(-dt/4));
+  for (const tp of TAPS) if (tt>=tp && tt<tp+0.05 && !S.tapped.has(tp)){ S.tapped.add(tp); S.expanded=!S.expanded; S.ripple=0; S.toast=0; }
+  if (tt<0.05) S.tapped.clear();
+  if (S.ripple>=0){ S.ripple+=dt; if(S.ripple>0.6) S.ripple=-1; } S.toast+=dt;
+  S.morph+=((S.expanded?1:0)-S.morph)*(1-Math.exp(-dt/0.09));
+}
+const netFrac=v=>Math.min(1,Math.pow(Math.abs(v)/2500,0.6));
+const fmtNet=(v,c)=>{const a=Math.abs(v),s=v>=0?'+':'−';return a>=1000?s+(a/1000).toFixed(1)+'k':s+Math.round(a)};
+function text(s,x,y,size,col,w='700',al='center'){g.font=`${w} ${size}px ${FONT}`;g.fillStyle=col;g.textAlign=al;g.textBaseline='middle';g.fillText(s,x,y)}
+
+// ---------------- primitives ----------------
+function track(cx,cy,r,w){g.strokeStyle='rgba(255,255,255,0.08)';g.lineWidth=w;g.beginPath();g.arc(cx,cy,r,0,TAU);g.stroke()}
+// net ring: conic stroke that runs along the option-6 scale (green at 12 o'clock -> amber clockwise / blue counter-clockwise)
+function netRing(cx,cy,r,w,v,glowK){
+  const f=netFrac(v), sw=f*TAU; if(sw<0.01) return;
+  const dir=v>=0?1:-1, a0=dir>0?TOP:TOP-sw, a1=dir>0?TOP+sw:TOP;
+  const cg=g.createConicGradient(a0,cx,cy), n=8;
+  for(let i=0;i<=n;i++){ const s=i/n, val=(dir>0? s : 1-s)*Math.abs(v)*dir; cg.addColorStop(s*f*0.999, rgb(netScale(val))); }
+  cg.addColorStop(Math.min(1,f+0.001),'rgba(0,0,0,0)');
+  g.strokeStyle=cg; g.lineWidth=w; g.lineCap='round'; g.beginPath(); g.arc(cx,cy,r,a0,a1); g.stroke();
+  headGlow(cx,cy,r,dir>0?a1:a0,w,S.netCol,glowK);
+}
+function brakeRing(cx,cy,r,w,b,glowK){
+  const sw=b*TAU; if(sw<0.01) return;
+  const cg=g.createConicGradient(TOP,cx,cy), f=b*0.999;
+  cg.addColorStop(0,rgb(mix(ORANGE,[0,0,0],0.4))); cg.addColorStop(f,rgb(mix(ORANGE,[255,255,255],0.2))); cg.addColorStop(Math.min(1,f+0.001),'rgba(0,0,0,0)');
+  g.strokeStyle=cg; g.lineWidth=w; g.lineCap='round'; g.beginPath(); g.arc(cx,cy,r,TOP,TOP+sw); g.stroke();
+  headGlow(cx,cy,r,TOP+sw,w,ORANGE,glowK);
+}
+// minimal leading-end glow: a dot in the glow layer, brighter while the arc moves and at extremes
+function headGlow(cx,cy,r,a,w,col,k){ if(k<0.02) return;
+  gl.fillStyle=rgb(col,clamp(k)); gl.beginPath(); gl.arc(cx+Math.cos(a)*r,cy+Math.sin(a)*r,w*(0.9+0.9*k),0,TAU); gl.fill(); }
+function haloRing(cx,cy,r,col,k,width){ if(k<0.02) return; gl.strokeStyle=rgb(col,clamp(k)); gl.lineWidth=width; gl.beginPath(); gl.arc(cx,cy,r,0,TAU); gl.stroke(); }
+function glass(cx,cy,r,tint,tk){
+  g.save(); g.shadowColor='rgba(0,0,0,0.8)'; g.shadowBlur=8; g.shadowOffsetY=2;
+  g.fillStyle='#15181d'; g.beginPath(); g.arc(cx,cy,r,0,TAU); g.fill(); g.restore();
+  if (tk>0.01){ const gr=g.createRadialGradient(cx,cy,r*0.2,cx,cy,r); gr.addColorStop(0,rgb(tint,0.03*tk)); gr.addColorStop(1,rgb(tint,0.20*tk));
+    g.fillStyle=gr; g.beginPath(); g.arc(cx,cy,r,0,TAU); g.fill(); }
+  g.strokeStyle=tk>0.01?rgb(mix([255,255,255],tint,tk),0.10+0.30*tk):'rgba(255,255,255,0.10)'; g.lineWidth=1; g.beginPath(); g.arc(cx,cy,r-0.5,0,TAU); g.stroke();
+}
+function check(x,y,s,col,lw){ g.strokeStyle=col; g.lineWidth=lw; g.lineCap='round'; g.lineJoin='round'; g.beginPath(); g.moveTo(x-s*0.45,y); g.lineTo(x-s*0.12,y+s*0.32); g.lineTo(x+s*0.5,y-s*0.36); g.stroke(); }
+
+// ---------------- the bubble (option 1 rings) ----------------
+// healthy-hold cue variant: 1 = soft green halo + tinted rim (default) · 2 = check badge + tint · 3 = closed "lock" ring + HOLD
+function bubble(cx,cy,D,variant=1){
+  const R=D/2, h=S.healthy, I=S.intensity;
+  const w1=D*0.075, r1=R-w1/2-2.5, w2=D*0.06, r2=r1-w1/2-w2/2-2;
+  // state halo: calm near normal, stronger at extremes (one blurred layer)
+  haloRing(cx,cy,R+D*0.05, S.stCol, 0.10+0.55*I, D*(0.06+0.09*I));
+  if (variant===1) haloRing(cx,cy,R+D*0.05, GREEN, 0.55*h*(0.85+0.15*Math.sin(S.t*TAU*0.35)), D*0.10);
+  glass(cx,cy,R,GREEN, variant===3?0.4*h:h);
+  track(cx,cy,r1,w1); track(cx,cy,r2,w2);
+  const kN=clamp(S.netV*1.5)*0.7+0.35*I, kB=clamp(S.brakeV*2.5)*0.7+0.6*clamp((S.brake-0.75)/0.25);
+  netRing(cx,cy,r1,w1,S.net,kN);
+  brakeRing(cx,cy,r2,w2,S.brake,kB);
+  if (variant===3 && h>0.02){ g.strokeStyle=rgb(GREEN,0.9*h); g.lineWidth=1.6; g.beginPath(); g.arc(cx,cy,R+2.5,0,TAU); g.stroke(); haloRing(cx,cy,R+2.5,GREEN,0.5*h,3); }
+  const numCol=rgb(mix(S.netCol,[255,255,255],0.35));
+  text(fmtNet(S.net),cx,cy-R*0.04,D*0.235,numCol);
+  const sub = variant===3 && h>0.5 ? 'HOLD' : (D>=64?`mW · ${S.pct}%`:'mW');
+  text(sub,cx,cy+R*0.36,D*0.105, variant===3&&h>0.5?rgb(GREEN):'rgba(255,255,255,0.55)', variant===3&&h>0.5?'800':'500');
+  if (variant===1 && h>0.05) check(cx,cy-R*0.42,D*0.11,rgb(GREEN,h),Math.max(1.4,D*0.025));
+  if (variant===2 && h>0.02){ const bx=cx+R*0.72, by=cy-R*0.72, br=D*0.12*(0.6+0.4*h);
+    g.fillStyle=rgb(GREEN,h); g.beginPath(); g.arc(bx,by,br,0,TAU); g.fill(); g.strokeStyle='#000'; g.lineWidth=1.5; g.stroke();
+    check(bx,by,br*1.1,`rgba(10,20,10,${h})`,Math.max(1.4,D*0.03)); }
+}
+// expanded pill: bubble on the left + live text; width morphs 0..1
+function pill(x,cy,Wd,Hd,morph,variant=1){
+  const R=Hd/2, w=Hd+(Wd-Hd)*morph;
+  if (morph>0.01){
+    g.save(); g.shadowColor='rgba(0,0,0,0.8)'; g.shadowBlur=8; g.shadowOffsetY=2; g.fillStyle='#15181d';
+    g.beginPath(); g.roundRect(x,cy-R,w,Hd,R); g.fill(); g.restore();
+    const hk=S.healthy;
+    g.strokeStyle=hk>0.05?rgb(GREEN,0.25+0.35*hk):rgb(S.stCol,0.35); g.lineWidth=1; g.beginPath(); g.roundRect(x+0.5,cy-R+0.5,w-1,Hd-1,R); g.stroke();
+    if (hk>0.02 && variant===1) { gl.strokeStyle=rgb(GREEN,0.35*hk); gl.lineWidth=Hd*0.12; gl.beginPath(); gl.roundRect(x,cy-R,w,Hd,R); gl.stroke(); }
+    g.save(); g.beginPath(); g.roundRect(x,cy-R,w,Hd,R); g.clip(); g.globalAlpha=clamp((morph-0.4)/0.6);
+    const tx=x+Hd+8, right=x+Wd-14;
+    text(`${fmtNet(S.net)} mW`,tx,cy-R*0.52,13,rgb(mix(S.netCol,[255,255,255],0.35)),'700','left');
+    const healthy=S.healthy>0.5;
+    text(healthy?'Holding ✓':ST[S.state].name,right,cy-R*0.52,9.5,healthy?rgb(GREEN):rgb(S.stCol),'700','right');
+    text(`Brake ${Math.round(S.brake*100)}% · Hold ${S.hold}%`,tx,cy-R*0.08,9.5,'rgba(255,255,255,0.78)','500','left');
+    text(`${S.pct}% · ${S.temp.toFixed(1)} °C`,tx,cy+R*0.30,9.5,'rgba(255,255,255,0.6)','500','left');
+    const q=S.state==='holding'?C.green:S.state==='inuse'?C.amber:null;
+    if(q){ g.fillStyle=q; g.beginPath(); g.arc(right-42,cy+R*0.30,2.8,0,TAU); g.fill(); text(S.state==='holding'?'~2 h/1%':'~25 m/1%',right,cy+R*0.30,9,'rgba(255,255,255,0.6)','500','right'); }
+    const sx=tx, sw=right-tx, sy=cy+R*0.66, sh=7;
+    g.strokeStyle='rgba(255,255,255,0.12)'; g.lineWidth=1; g.beginPath(); g.moveTo(sx,sy); g.lineTo(sx+sw,sy); g.stroke();
+    g.strokeStyle=rgb(S.netCol,0.9); g.lineWidth=1.3; g.beginPath();
+    S.hist.forEach((v,i)=>{const px=sx+i/29*sw, py=sy-clamp(v/1500,-1,1)*sh; i?g.lineTo(px,py):g.moveTo(px,py)}); g.stroke();
+    g.restore();
+  }
+  bubble(x+R,cy,Hd,variant);
+}
+
+// ---------------- page ----------------
+function badge(n,x,y){ g.fillStyle='#fff'; g.beginPath(); g.arc(x,y,12,0,TAU); g.fill(); text(String(n),x,y+1,16,'#000','900'); }
+function sect(s,y){ text(s,16,y,10,'rgba(255,255,255,0.5)','700','left'); g.fillStyle='rgba(255,255,255,0.08)'; g.fillRect(16,y+9,W-32,1); }
+function small(s,x,y,col='rgba(255,255,255,0.5)'){ text(s,x,y,9,col,'500'); }
+function render(){
+  g.setTransform(DPR,0,0,DPR,0,0); gl.setTransform(DPR,0,0,DPR,0,0);
+  g.fillStyle='#000'; g.fillRect(0,0,W,H); gl.clearRect(0,0,W,H);
+  text('Charge Brake · floating bubble v2',W/2,26,14,'#fff','800');
+  text('dual rings (outer net · inner brake) + tap to expand · mode is remembered',W/2,44,9.5,'rgba(255,255,255,0.6)','500');
+
+  // A. live bubble with simulated taps
+  sect('LIVE · TAP TOGGLES SMALL ⇄ EXPANDED (SAVED)',70);
+  const lx=24, ly=128;
+  pill(lx,ly,236,72,S.morph,1);
+  if (S.ripple>=0){ const k=S.ripple/0.6; g.strokeStyle=`rgba(255,255,255,${0.6*(1-k)})`; g.lineWidth=2; g.beginPath(); g.arc(lx+36,ly,10+40*k,0,TAU); g.stroke();
+    g.fillStyle=`rgba(255,255,255,${0.35*(1-k)})`; g.beginPath(); g.arc(lx+36,ly,9,0,TAU); g.fill(); }
+  if (S.toast<1.8){ const a=clamp(Math.min(S.toast/0.2,(1.8-S.toast)/0.4)); g.globalAlpha=a;
+    g.fillStyle='rgba(40,44,52,0.95)'; g.beginPath(); g.roundRect(W-118,ly+44,104,20,10); g.fill();
+    text(S.expanded?'mode saved: expanded':'mode saved: small',W-66,ly+54,9,'#fff','600'); g.globalAlpha=1; }
+  text(S.label,W-16,ly-46,10.5,rgb(S.stCol),'700','right');
+
+  // B. both states, both sizes
+  sect('BOTH STATES',200);
+  bubble(60,256,72,1); small('small · 72 dp',60,302);
+  bubble(150,262,56,1); small('small · 56 dp',150,302);
+  text('tap ⇄',220,258,10,'rgba(255,255,255,0.45)','600');
+  pill(24,350,236,72,1,1); small('expanded · 236 × 72 dp (tap again to shrink)',142,396);
+
+  // C. healthy-hold indicator variants (numbered)
+  const yc=420;
+  sect('HEALTHY-HOLD CUE · VARIANTS (holding, net within ±150 mW)',yc);
+  const names=['Green halo + ✓','Check badge + tint','Lock ring + HOLD'];
+  for(let v=1;v<=3;v++){ const cx=60+(v-1)*120;
+    badge(v,cx-44,yc+30); text(names[v-1],cx-28,yc+30,9.5,'rgba(255,255,255,0.85)','700','left');
+    bubble(cx,yc+88,72,v); bubble(cx,yc+164,56,v); small('72 dp',cx,yc+132); small('56 dp',cx,yc+200); }
+
+  // D. legend + render notes
+  sect('KEY',632);
+  const bx=24, by=652, bw=W-48;
+  const lg=g.createLinearGradient(bx,0,bx+bw,0); lg.addColorStop(0,C.blue); lg.addColorStop(0.46,C.green); lg.addColorStop(0.54,C.green); lg.addColorStop(1,C.amber);
+  g.fillStyle=lg; g.beginPath(); g.roundRect(bx,by,bw,6,3); g.fill();
+  const mk=bx+bw*(clamp(S.net,-2000,2000)+2000)/4000; g.fillStyle='#fff'; g.beginPath(); g.moveTo(mk,by-2); g.lineTo(mk-4,by-8); g.lineTo(mk+4,by-8); g.closePath(); g.fill();
+  small('−2 W draining',bx+30,by+16); small('0 · steady ±150 mW',W/2,by+16); small('+2 W gaining',bx+bw-28,by+16);
+  ['Outer ring = net (option-6 scale, arc length = size).','Inner ring = brake 0–100 %. Head glow = arc moving.',
+   'Halo + glow grow toward extremes, calm near normal.','Halo colour = state (amber/orange/green/blue/purple).'].forEach((s,i)=>
+     text(s,16,by+36+i*15,9.5,'rgba(255,255,255,0.75)','500','left'));
+  sect('RENDER BUDGET',756);
+  ['~1 Hz values, ~400 ms easing, then idle (no 60 fps loop).','2 tracks + 2 conic arcs + text in a 56–72 dp window.',
+   'All glow in ONE offscreen layer, blurred once, added.','Pill text drawn only when expanded; mode saved in prefs.'].forEach((s,i)=>
+     text('· '+s,16,776+i*15,9.5,'rgba(255,255,255,0.65)','500','left'));
+
+  // composite the single glow layer
+  g.save(); g.setTransform(1,0,0,1,0,0); g.globalCompositeOperation='lighter'; g.filter=`blur(${5*DPR}px)`; g.drawImage(glc,0,0); g.restore();
+}
+
+const manual=new URLSearchParams(location.search).has('manual');
+window.__advance=dt=>{const n=Math.max(1,Math.round(dt/(1/120)));for(let i=0;i<n;i++)step(dt/n);render()};
+window.__seek=t=>{S.t=0;S.lastSample=-1;S.tapped.clear();S.expanded=false;S.morph=0;for(let i=0;i<t*120;i++)step(1/120);render()};
+if(!manual){let last=performance.now();(function f(now){const dt=Math.min(0.1,(now-last)/1000);last=now;step(dt);render();requestAnimationFrame(f)})(last)} else render();
+</script></body></html>

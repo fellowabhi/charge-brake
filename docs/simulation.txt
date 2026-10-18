@@ -1,10 +1,3 @@
-=== Charge Brake v0.3 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===
-field: surplus +700 mW, gain 1.2 W   net    +0 mW (sd   67) | burn 58.3% jitter  3.9% | level 60-60% | mAh err max   1.6 end  +0.4 | in-use trig 3
-weak burn gain 0.8 W                 net   -18 mW (sd   68) | burn 64.8% jitter  4.2% | level 60-60% | mAh err max  10.5 end  +0.3 | in-use trig 1
-strong burn gain 3 W                 net    +0 mW (sd  122) | burn 23.3% jitter  3.3% | level 60-60% | mAh err max   1.3 end  +1.0 | in-use trig 11
-surplus +300 mW                      net    -1 mW (sd   64) | burn 25.1% jitter  3.7% | level 60-60% | mAh err max   1.4 end  -0.0 | in-use trig 2
-lag: 2 s sensor period               net    -3 mW (sd  154) | burn 58.6% jitter  9.2% | level 60-60% | mAh err max   2.4 end  +0.3 | in-use trig 24
-start 57.5%, target 60%              net   +11 mW (sd   77) | burn 57.4% jitter  3.7% | level 60-60% | mAh err max   8.8 end  +0.0 | in-use trig 2 | burn below target 0%, reached after 41 min
 === drain: start 57.5%, target 55% (5 W charger, steady) ===
 field phone (gain 1.2 W)   Gentle net while draining  -111 mW | reached 55% after 163.6 min | then level 55-55%, mAh err max  0.9 | temp max 45.0°C (hot pause) | re-drains 0
 field phone (gain 1.2 W)   Normal net while draining  -176 mW | reached 55% after 159.6 min | then level 55-55%, mAh err max  1.0 | temp max 45.0°C (hot pause) | re-drains 0
@@ -25,3 +18,11 @@ hold quality: charger too weak (0.5 W, phone 2.5 W) drift -2002 mW (±60) -> 6 m
 5 W surge (field charger)            tripped: false
 15 W + Ignore                        burn after Ignore 80%
 random use 0.5-2 W, 5-55 s           net    +1 mW (sd  307) | burn 47.2% jitter  9.1% | level 60-60% | mAh err max   3.9 end  +1.0 | in-use trig 53 | back-off to 30% in median 4.5 s (n=38)
+=== Charge Brake v0.4 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===
+field: surplus +700 mW, gain 1.2 W   net    +0 mW (sd   67) | burn 58.3% jitter  3.9% | level 60-60% | mAh err max   1.6 end  +0.4 | in-use trig 3
+weak burn gain 0.8 W                 net   -18 mW (sd   68) | burn 64.8% jitter  4.2% | level 60-60% | mAh err max  10.5 end  +0.3 | in-use trig 1
+strong burn gain 3 W                 net    +0 mW (sd  122) | burn 23.3% jitter  3.3% | level 60-60% | mAh err max   1.3 end  +1.0 | in-use trig 11
+surplus +300 mW                      net    -1 mW (sd   64) | burn 25.1% jitter  3.7% | level 60-60% | mAh err max   1.4 end  -0.0 | in-use trig 2
+lag: 2 s sensor period               net    -3 mW (sd  154) | burn 58.6% jitter  9.2% | level 60-60% | mAh err max   2.4 end  +0.3 | in-use trig 24
+start 57.5%, target 60%              net   +11 mW (sd   77) | burn 57.4% jitter  3.7% | level 60-60% | mAh err max   8.8 end  +0.0 | in-use trig 2 | burn below target 0%, reached after 41 min
+smoother: max step 0.156 mAh/s, max error 0.54 mAh

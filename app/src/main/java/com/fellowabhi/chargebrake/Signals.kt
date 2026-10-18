@@ -94,3 +94,46 @@ class DriftMeter(private val window: Int = 300) {
         }
     }
 }
+
+/**
+ * Display value for the charge graph: follows the mAh reading (fuel gauge or counted) but moves smoothly between
+ * its steps by integrating the live current, then is pulled gently onto the reading. A source switch or any
+ * jump > JUMP mAh is returned as a shift so the caller can move the old curve instead of drawing a step.
+ */
+class MahSmoother {
+    var value = Float.NaN; private set
+    private var src = ""
+    fun reset() { value = Float.NaN; src = "" }
+    fun update(dt: Float, mah: Float, source: String, mA: Float, mAok: Boolean): Float {
+        if (mah.isNaN()) { value = Float.NaN; return 0f }
+        if (value.isNaN()) { value = mah; src = source; return 0f }
+        if (source != src || abs(mah - value) > JUMP) { val d = mah - value; value = mah; src = source; return d }
+        if (mAok) value += mA * dt / 3600f
+        val tau = if (source == MahTracker.SRC_GAUGE) 30f else 4f
+        value += (mah - value) * (dt / tau).coerceAtMost(1f)
+        return 0f
+    }
+    companion object { const val JUMP = 15f }
+}
+
+/**
+ * Own UI power cost (estimate): average of (net + brake) — the power left over after the phone's own use — while the
+ * screen is on with the app in front (eco or live) vs. with it in the background. The difference is what the
+ * app's screen costs. 10 min averages, separate for plugged / on battery; needs ≥ 60 s of each.
+ */
+class UiCost {
+    private val mean = Array(2) { FloatArray(3) { Float.NaN } }   // [plugged][ui mode]
+    private val secs = Array(2) { FloatArray(3) }
+    fun add(mode: Int, screenOn: Boolean, plugged: Boolean, sur: Float, dt: Float) {
+        if (!screenOn || mode !in 0..2) return
+        val p = if (plugged) 1 else 0; val m = mean[p][mode]
+        mean[p][mode] = if (m.isNaN()) sur else m + (sur - m) * dt / (600f + dt)
+        secs[p][mode] += dt
+    }
+    fun seconds(mode: Int, plugged: Boolean) = secs[if (plugged) 1 else 0][mode]
+    /** mW the given UI mode costs vs. the app in the background (NaN = not enough data). */
+    fun cost(mode: Int, plugged: Boolean): Float {
+        val p = if (plugged) 1 else 0
+        return if (secs[p][mode] >= 60f && secs[p][0] >= 60f) mean[p][0] - mean[p][mode] else Float.NaN
+    }
+}

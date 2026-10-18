@@ -8,6 +8,7 @@ import android.content.res.Configuration
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Log
 import android.util.TypedValue
 import android.view.Choreographer
@@ -23,6 +24,7 @@ import kotlin.math.exp
 import kotlin.math.roundToInt
 
 class MainActivity : Activity(), Choreographer.FrameCallback {
+    companion object { const val EXTRA_BUBBLE = "bubble"; const val ECO_MS = 333L }
     // views (rebuilt on fold/unfold)
     private lateinit var root: ScrollView
     private lateinit var num: TextView
@@ -43,6 +45,21 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var brakeCard: GlowFrame; private lateinit var brakeTitle: TextView; private lateinit var screenOn: TextView
     private lateinit var pill: PillSwitch
     private lateinit var targetRow: FlowRow
+    private lateinit var bubPill: PillSwitch; private lateinit var bubSub: TextView
+    private val modeTags = ArrayList<TextView>()
+    private var pendingBubble = false
+    private val ecoH = android.os.Handler(android.os.Looper.getMainLooper())
+    private var lastEco = 0L
+    private val ecoTick = object : Runnable {
+        override fun run() {
+            if (!running || Monitor.live) return
+            ecoH.postDelayed(this, ECO_MS)
+            val now = android.os.SystemClock.uptimeMillis()
+            val dt = if (lastEco == 0L) ECO_MS / 1000f else ((now - lastEco) / 1000f).coerceIn(0.05f, 1f)
+            lastEco = now
+            frame(dt)
+        }
+    }
     private val dots = ArrayList<View>()
     private var wide = false
     private var unitView: TextView? = null
@@ -62,17 +79,46 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         rebuild()
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        if (intent?.getBooleanExtra(EXTRA_BUBBLE, false) == true) toggleBubble()
+    }
+
+    override fun onNewIntent(i: Intent?) { super.onNewIntent(i); if (i?.getBooleanExtra(EXTRA_BUBBLE, false) == true) toggleBubble() }
+
+    override fun onResume() {
+        super.onResume()
+        if (pendingBubble) {
+            pendingBubble = false
+            if (Settings.canDrawOverlays(this)) { Monitor.setBubble(true); BrakeService.sync(this) }
+            else android.widget.Toast.makeText(this, "Bubble needs \"Display over other apps\"", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Floating bubble on/off. First time: ask for "Display over other apps", then turn it on when we come back. */
+    private fun toggleBubble() {
+        if (Monitor.bubble) { Monitor.setBubble(false); BrakeService.sync(this); return }
+        if (Settings.canDrawOverlays(this)) { Monitor.setBubble(true); BrakeService.sync(this); return }
+        pendingBubble = true
+        runCatching { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:$packageName"))) }
+            .onFailure { pendingBubble = false }
+    }
+
+    /** Eco (default): ~3 Hz updates, no glow/pulse loops, normal screen timeout. Live: every frame, screen on while plugged. */
+    private fun startLoop() {
+        Choreographer.getInstance().removeFrameCallback(this); ecoH.removeCallbacks(ecoTick)
+        Monitor.uiMode = if (Monitor.live) Monitor.UI_LIVE else Monitor.UI_ECO
+        lastNs = 0; lastEco = 0
+        if (Monitor.live) Choreographer.getInstance().postFrameCallback(this) else ecoH.post(ecoTick)
     }
 
     override fun onConfigurationChanged(c: Configuration) { super.onConfigurationChanged(c); rebuild() }
 
-    override fun onStart() { super.onStart(); Monitor.acquire(this); running = true; lastNs = 0; Choreographer.getInstance().postFrameCallback(this) }
-    override fun onStop() { running = false; Choreographer.getInstance().removeFrameCallback(this); Monitor.release(); setKeepOn(false); super.onStop() }
+    override fun onStart() { super.onStart(); Monitor.acquire(this); running = true; startLoop() }
+    override fun onStop() { running = false; Monitor.uiMode = Monitor.UI_NONE; Choreographer.getInstance().removeFrameCallback(this); ecoH.removeCallbacks(ecoTick); Monitor.release(); setKeepOn(false); super.onStop() }
 
     private fun rebuild() {
         val cfg = resources.configuration
         wide = cfg.screenWidthDp >= 600
-        dots.clear(); bgColor = 0; targetKey = ""; lastH = 0
+        dots.clear(); modeTags.clear(); bgColor = 0; targetKey = ""; lastH = 0
         val content = if (wide) buildInner() else buildCover()
         root = ScrollView(this).apply { fitsSystemWindows = true; isFillViewport = true; isVerticalScrollBarEnabled = false; addView(content) }
         // size the graphs from the real viewport height (known after the first layout)
@@ -97,10 +143,25 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun setH(v: View, h: Int) { val lp = v.layoutParams ?: return; if (lp.height != h) { lp.height = h; v.layoutParams = lp } }
 
     // ---------- pieces ----------
+    /** Eco / Live view toggle (tap). Live = smooth every-frame updates and the screen stays on while plugged. */
     private fun liveTag(): View {
-        val r = row(PulseDot(this).also { dots += it }, text(11f, 0xFFFF6B6B.toInt(), bold = true, txt = "LIVE"), gap = 4)
+        val lbl = text(11f, 0xFFFF6B6B.toInt(), bold = true, txt = "LIVE")
+        val r = row(PulseDot(this).also { dots += it }, lbl, gap = 4)
         r.getChildAt(0).layoutParams = LinearLayout.LayoutParams(dp(10), dp(10))
+        r.setPadding(dp(8), dp(4), dp(9), dp(4))
+        r.setOnClickListener { Monitor.setLive(!Monitor.live); updMode(); startLoop() }
+        modeTags += lbl
         return r
+    }
+    private fun updMode() {
+        val live = Monitor.live
+        modeTags.forEach { t ->
+            t.text = if (live) "LIVE" else "ECO · tap for live"
+            t.setTextColor(if (live) 0xFFFF6B6B.toInt() else C_DIM)
+            (t.parent as? View)?.background = round(0, dpf(99f), if (live) 0x66FF6B6B else C_LINE, dp(1))
+        }
+        dots.forEach { (it as? PulseDot)?.apply { animate = live; color = if (live) 0xFFFF4D4D.toInt() else C_FAINT; invalidate() } }
+        if (::chart.isInitialized) { chart.animate = live; charge.animate = live }
     }
 
     private fun titleRow(): View {
@@ -251,13 +312,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
 
     private fun graphCard(explain: Boolean): GlowFrame {
         gCard = GlowFrame(this).apply { pad(dp(10), dp(10), dp(10), dp(6)) }
-        gTitle = text(14f, C_TXT, bold = true, txt = "Power · last 2 min")
+        gTitle = text(14f, C_TXT, bold = true, txt = "Power · last ${Monitor.spanLabel()}")
         gCard.add(cardHead(gTitle, liveTag()))
         val leg = FlowRow(this, dp(12), dp(4))
         listOf(legendItem(0xFFFFFFFF.toInt(), "net mW, 1.5 s avg (left)", 0), legendItem(0x66FFFFFF, "raw", 0),
             legendItem(0, "brake % (right)", 1), legendItem(0, "net-zero band ±100 mW (when holding)", 2)).forEach { leg.addView(it) }
         gCard.add(leg, dp(6))
-        chart = ChartView(this, Monitor.hist)
+        chart = ChartView(this, Monitor.hist).apply { onSpan = { spanChanged() } }
         gCard.add(chart, dp(6), 0, weight = 1f)
         if (explain) gCard.add(text(11f, C_FAINT, txt = "Above the band = battery charging, so the brake rises. Below = phone uses more than the charger gives, so the brake backs off. Tap to change the time span."), dp(4))
         return gCard
@@ -265,14 +326,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
 
     private fun chargeCard(): GlowFrame {
         cCard = GlowFrame(this).apply { pad(dp(10), dp(10), dp(10), dp(6)) }
-        cTitle = text(14f, C_TXT, bold = true, txt = "Charge · last 1 h")
+        cTitle = text(14f, C_TXT, bold = true, txt = "Charge · last ${Monitor.spanLabel()}")
         cNow = text(11.5f, C_DIM)
         cCard.add(cardHead(cTitle, cNow))
         val leg = FlowRow(this, dp(12), dp(4))
-        listOf(legendItem(C_AMBER, "charging up", 0), legendItem(C_GREEN, "holding", 0), legendItem(C_PURPLE, "draining", 0), legendItem(C_BLUE, "brake off", 0),
+        listOf(legendItem(C_AMBER, "gaining", 0), legendItem(C_GREEN, "steady ±100 mW", 0), legendItem(C_BLUE, "draining", 0),
             legendItem(C_GREEN, "hold / target", 3)).forEach { leg.addView(it) }
         cCard.add(leg, dp(6))
-        charge = ChargeView(this, Monitor.lhist)
+        charge = ChargeView(this, Monitor.lhist).apply { onSpan = { spanChanged() } }
         cCard.add(charge, dp(4), 0, weight = 1f)
         return cCard
     }
@@ -294,8 +355,17 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         det.addView(text(14f, C_DIM, txt = "›"))
         det.setOnClickListener { startActivity(Intent(this, DetailsActivity::class.java)) }
         col.add(det)
+        val bub = GlowFrame(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; pad(dp(14), dp(8), dp(14), dp(8)) }
+        val bt = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        bt.add(text(14f, C_TXT, txt = "Floating bubble"))
+        bubSub = text(11.5f, C_DIM); bt.add(bubSub, dp(2))
+        bub.addView(bt, LinearLayout.LayoutParams(0, -2, 1f))
+        bubPill = PillSwitch(this).apply { color = C_TEAL }; bub.addView(bubPill, LinearLayout.LayoutParams(dp(46), dp(26)).apply { leftMargin = dp(8) })
+        bub.setOnClickListener { toggleBubble() }
+        col.add(bub)
         return col
     }
+    private fun spanChanged() { chart.invalidate(); charge.invalidate(); gTitle.text = "Power · last ${Monitor.spanLabel()}"; cTitle.text = "Charge · last ${Monitor.spanLabel()}" }
 
     private fun buildCover(): View {
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(11), dp(6), dp(11), dp(16)) }
@@ -303,7 +373,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         col.add(titleRow()); col.add(hero((w / 7.2f).coerceIn(34f, 50f)), dp(6)); col.add(bannerView(), dp(4))
         col.add(targetControls(), dp(2)); col.add(tilesGrid(22f), dp(4))
         col.add(graphCard(false), 0, dp(260)); col.add(chargeCard(), 0, dp(200)); col.add(controls())
-        updTarget()
+        updTarget(); updMode()
         return col
     }
 
@@ -321,7 +391,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         panel.add(targetControls(), dp(2)); panel.add(tilesGrid(24f), dp(4)); panel.add(controls())
         top.addView(panel, LinearLayout.LayoutParams(0, -2, 38f).apply { leftMargin = dp(4) })
         rootL.add(top, dp(4))
-        updTarget()
+        updTarget(); updMode()
         return rootL
     }
 
@@ -374,15 +444,40 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
             val tag = "${resources.configuration.screenWidthDp}x${resources.configuration.screenHeightDp}"
             save(c, c.width, maxOf(c.height, root.height), "snap-$tag-full.png")
+            // the floating bubble, rendered offscreen with its real drawing code: live data + fixed examples
+            fun bub(name: String, data: BubbleData, exp: Boolean, mirror: Boolean = false) {
+                val bv = BubbleView(this); bv.setExpanded(exp, animate = false); bv.mirror = mirror
+                // a short history for the sparkline
+                for (k in 0 until 30) bv.push(data.copy(net = data.net + 60f * kotlin.math.sin(k * 0.7f)), animate = false)
+                bv.push(data, animate = false)
+                val w = bv.wantW().toInt(); val h = bv.wantH().toInt()
+                bv.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY)); bv.layout(0, 0, w, h)
+                val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+                val cv = android.graphics.Canvas(bmp); cv.drawColor(0xFF000000.toInt()); bv.draw(cv)
+                java.io.FileOutputStream(java.io.File(dir, name)).use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            }
+            val live = BubbleData.from(Monitor)
+            bub("bub-live-small.png", live, false); bub("bub-live-exp.png", live, true)
+            val hold = BubbleData(35f, 0.62f, St.HOLDING, 60, 60, 2916f, 2918f, 37.2f, Float.POSITIVE_INFINITY, false)
+            bub("bub-hold-small.png", hold, false); bub("bub-hold-exp.png", hold, true)
+            bub("bub-brake-small.png", hold.copy(net = 1450f, brake = 0.97f, st = St.BRAKING, minPerPct = 22f), false)
+            bub("bub-brake-exp.png", hold.copy(net = 1450f, brake = 0.97f, st = St.BRAKING, minPerPct = 22f), true, mirror = true)
+            bub("bub-up-exp.png", BubbleData(2350f, 0f, St.CHARGING_UP, 54, 56, 2722f, 2625f, 35.4f, Float.NaN, false), true)
+            bub("bub-drain-small.png", BubbleData(-420f, 0.95f, St.DRAINING, 61, 60, 2916f, 2958f, 39.1f, Float.NaN, false), false)
         }
     }
 
     // ---------- per-frame animation ----------
     override fun doFrame(ns: Long) {
-        if (!running) return
+        if (!running || !Monitor.live) return
         Choreographer.getInstance().postFrameCallback(this)
         val dt = if (lastNs == 0L) 0.016f else ((ns - lastNs) / 1e9f).coerceIn(0.001f, 0.1f)
         lastNs = ns
+        frame(dt)
+    }
+
+    private fun frame(dt: Float) {
+        val live = Monitor.live
         val m = Monitor; val c = m.ctl; val st = m.state
         val k = 1f - exp(-dt / 0.25f); val k2 = 1f - exp(-dt / 0.6f)
         dGlow = lerpColor(dGlow, Look.color(st), k2)
@@ -393,7 +488,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val sur = m.avgMw + m.burnMw; dSur += (sur - dSur) * k * 0.6f
         val pu = m.phoneUse.let { if (it.isNaN()) it else it.coerceAtLeast(0f) }; dUse = if (pu.isNaN()) Float.NaN else if (dUse.isNaN()) pu else dUse + (pu - dUse) * k * 0.5f
 
-        num.text = fmtSigned(dNum); num.setTextColor(dNumCol); num.setShadowLayer(dpf(16f), 0f, 0f, withAlpha(dNumCol, 0.55f))
+        num.text = fmtSigned(dNum); num.setTextColor(dNumCol); num.setShadowLayer(dpf(if (live) 16f else 10f), 0f, 0f, withAlpha(dNumCol, if (live) 0.55f else 0.35f))
         unitView?.setTextColor(dNumCol)
         raw.text = String.format(Locale.US, "raw %s mW · %s mA · %.3f V · %.1f Hz", fmtSigned(m.mW), fmtSigned(m.mA), m.volt, m.rateHz)
         useLine.text = when {
@@ -404,7 +499,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
 
         bTitle.text = Look.title(st, m); bSub.text = Look.sub(st, m); bIcon.text = Look.glyph(st)
         bTitle.setTextColor(dGlow); bTitle.setShadowLayer(dpf(8f), 0f, 0f, withAlpha(dGlow, 0.6f)); bIcon.setTextColor(dGlow)
-        val pulse = 0.5f + 0.5f * kotlin.math.sin(System.nanoTime() / 1e9 * 2 * Math.PI).toFloat()
+        val pulse = if (!live) 0.5f else 0.5f + 0.5f * kotlin.math.sin(System.nanoTime() / 1e9 * 2 * Math.PI).toFloat()
         bIcon.background = round(withAlpha(dGlow, 0.14f + 0.12f * pulse), dpf(16f))
         val act = Look.action(st)
         if (act == null) bAction.visibility = View.GONE else {
@@ -436,9 +531,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         } else if (qTile.visibility != View.GONE) qTile.visibility = View.GONE
 
         gCard.glowColor = dGlow; gCard.glow = 0.55f; gCard.tint = 0.6f; gCard.stroke = 0.8f; gCard.invalidate()
-        gTitle.text = "Power · last ${chart.label()}"
+        gTitle.text = "Power · last ${m.spanLabel()}"
         chart.glowColor = dGlow; chart.headColor = dNumCol; chart.invalidate()
-        cTitle.text = "Charge · last ${charge.label()}"
+        cTitle.text = "Charge · last ${m.spanLabel()}"
         cNow.text = if (m.mah.isNaN()) "${m.pct}%" else "${fmtInt(m.mah)} mAh · ${m.pct}% · ${m.mahT.source}"
         charge.invalidate()
 
@@ -446,11 +541,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         brakeTitle.text = if (m.enabled) "Brake ON" else "Brake OFF"
         brakeCard.glowColor = dGlow; brakeCard.glow = if (m.enabled) 0.6f else 0f; brakeCard.tint = if (m.enabled) 0.8f else 0f; brakeCard.stroke = brakeCard.glow; brakeCard.invalidate()
         val plugged = m.plugged != 0
-        setKeepOn(plugged)
-        screenOn.text = if (plugged) "☀ Screen stays on while plugged" else "Screen on: only while plugged in"
-        screenOn.setTextColor(if (plugged) C_GREEN else C_DIM)
+        setKeepOn(plugged && live)
+        screenOn.text = when { !live -> "Eco view · normal screen timeout"; plugged -> "☀ Live: screen stays on while plugged"; else -> "Live: screen on only while plugged in" }
+        screenOn.setTextColor(if (plugged && live) C_GREEN else C_DIM)
+        val bOn = m.bubble && Settings.canDrawOverlays(this)
+        bubPill.pos += ((if (bOn) 1f else 0f) - bubPill.pos) * (1f - exp(-dt / 0.12f)); bubPill.invalidate()
+        bubSub.text = when { !bOn -> "over other apps · tap to turn on"; m.enabled -> "on · tap it to expand, long-press to open"; else -> "on · shows while Brake is on" }
         updTarget()
-        dots.forEach { it.invalidate() }
+        if (live) dots.forEach { it.invalidate() }
         maybeSnap()
 
         if (bgColor == 0 || dGlow != bgColor) {

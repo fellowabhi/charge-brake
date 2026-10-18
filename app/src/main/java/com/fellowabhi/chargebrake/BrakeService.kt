@@ -20,6 +20,7 @@ class BrakeService : Service() {
     private var lastNote = 0L
     private var lastKey = ""
     private val nm by lazy { getSystemService(NotificationManager::class.java) }
+    private var bubble: BubbleOverlay? = null
     private val onTick: () -> Unit = {
         val now = SystemClock.elapsedRealtime()
         if (now - lastNote >= 1500) { lastNote = now; post() }
@@ -31,6 +32,8 @@ class BrakeService : Service() {
         when (intent?.action) {
             ACTION_STOP -> { stopSelf(); return START_NOT_STICKY }
             ACTION_PAUSE -> { Monitor.setPaused(!Monitor.ctl.paused); lastNote = 0; return START_STICKY }
+            ACTION_BUBBLE -> { Monitor.init(this); Monitor.setBubble(!Monitor.bubble); if (running) { syncBubble(); post(); return START_STICKY }; stopSelf(); return START_NOT_STICKY }
+            ACTION_SYNC -> { if (running) { syncBubble(); post(); return START_STICKY }; stopSelf(); return START_NOT_STICKY }
         }
         nm.createNotificationChannel(NotificationChannel(CH, "Charge Brake", NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) })
         if (Build.VERSION.SDK_INT >= 34) startForeground(ID, note(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -43,6 +46,7 @@ class BrakeService : Service() {
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "chargebrake:brake").apply { setReferenceCounted(false); acquire() }
             Monitor.listeners.add(onTick)
         }
+        syncBubble()
         return START_STICKY
     }
 
@@ -50,11 +54,22 @@ class BrakeService : Service() {
         if (running) {
             running = false
             Monitor.listeners.remove(onTick)
+            bubble?.hide(); bubble = null
             Monitor.setEnabled(false)
             Monitor.release()
             wl?.release(); wl = null
         }
         super.onDestroy()
+    }
+
+    /** Show / hide the floating bubble to match the setting (needs the overlay permission). */
+    private fun syncBubble() {
+        val want = Monitor.bubble && android.provider.Settings.canDrawOverlays(this)
+        if (want) { if (bubble == null) bubble = BubbleOverlay(this); bubble?.show() } else { bubble?.hide(); bubble = null }
+    }
+
+    override fun onConfigurationChanged(c: android.content.res.Configuration) {
+        super.onConfigurationChanged(c); bubble?.place()       // fold / unfold: back onto the edge
     }
 
     private fun post() {
@@ -83,8 +98,15 @@ class BrakeService : Service() {
             .setCategory(Notification.CATEGORY_SERVICE)
             .addAction(Notification.Action.Builder(null, if (c.paused) "Resume" else "Pause", pause).build())
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
-            .addAction(Notification.Action.Builder(null, "Open", open).build())
+            .addAction(Notification.Action.Builder(null, if (Monitor.bubble && bubble?.shown == true) "Hide bubble" else "Bubble", bubblePi()).build())
             .build()
+    }
+
+    /** Bubble action: toggles in the service; without the overlay permission it opens the app to ask for it. */
+    private fun bubblePi(): PendingIntent {
+        val pi = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        return if (android.provider.Settings.canDrawOverlays(this)) PendingIntent.getService(this, 3, Intent(this, BrakeService::class.java).setAction(ACTION_BUBBLE), pi)
+        else PendingIntent.getActivity(this, 4, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP).putExtra(MainActivity.EXTRA_BUBBLE, true), pi)
     }
 
     companion object {
@@ -92,6 +114,9 @@ class BrakeService : Service() {
         const val CH = "brake"
         const val ACTION_STOP = "stop"
         const val ACTION_PAUSE = "pause"
+        const val ACTION_BUBBLE = "bubble"
+        const val ACTION_SYNC = "sync"
+        fun sync(c: Context) { if (Monitor.enabled) runCatching { c.startService(Intent(c, BrakeService::class.java).setAction(ACTION_SYNC)) } }
         fun start(c: Context) = c.startForegroundService(Intent(c, BrakeService::class.java))
         fun stop(c: Context) = c.stopService(Intent(c, BrakeService::class.java))
     }

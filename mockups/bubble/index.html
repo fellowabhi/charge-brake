@@ -1,0 +1,296 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Charge Brake · floating bubble options</title>
+<meta name="viewport" content="width=360">
+<style>
+  html,body{margin:0;background:#000;}
+  canvas{display:block;width:360px;height:850px;}
+</style></head>
+<body><canvas id="c"></canvas>
+<script>
+// ---------------------------------------------------------------------------
+// Charge Brake floating bubble: 6 design options over a Spotify-like screen.
+// Cover screen 360 x 850 dp. ?manual=1 exposes __advance(dt) / __seek(t).
+// ---------------------------------------------------------------------------
+const W = 360, H = 850;
+const cv = document.getElementById('c');
+const DPR = window.devicePixelRatio || 1;
+cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+const g = cv.getContext('2d');
+const FONT = 'Roboto, Inter, "Noto Sans", sans-serif';
+const TAU = Math.PI * 2, TOP = -Math.PI / 2;
+
+const C = { amber:'#FFB300', orange:'#FF7043', green:'#4CD07D', blue:'#4FA3FF', purple:'#B388FF', grey:'#9AA0A6', red:'#EF5350' };
+function hex(c){ const n=parseInt(c.slice(1),16); return [n>>16&255,n>>8&255,n&255]; }
+function rgb(a,al=1){ return `rgba(${a[0]|0},${a[1]|0},${a[2]|0},${al})`; }
+function mix(a,b,k){ return [a[0]+(b[0]-a[0])*k,a[1]+(b[1]-a[1])*k,a[2]+(b[2]-a[2])*k]; }
+function lighten(a,k){ return mix(a,[255,255,255],k); }
+
+// ---------------- dummy timeline (20 s loop) ----------------
+const KEYS = [ // t, net mW, brake 0..1
+  [0, 250, 0], [1.2, 320, 0], [1.8, 3800, 0], [2.5, 3500, 0.12], [6.5, 320, 0.84], [8, 40, 0.70], [10.2, 0, 0.62],
+  [10.7, -1150, 0.55], [11.3, -950, 0.14], [12.6, -700, 0.05], [13.3, 350, 0.12], [14.6, 20, 0.58],
+  [15.3, -160, 0.72], [16.2, -380, 0.92], [17.6, -360, 0.92], [18.4, -50, 0.66], [20, 0, 0.62] ];
+const PHASES = [ // t from, label, state
+  [0, 'Plugged in · charging', 'charging'], [1.5, 'Plug-in surge', 'charging'], [2.5, 'Brake ramping up', 'braking'],
+  [7.0, 'Steady · holding 60%', 'holding'], [10.3, 'Phone in use (dip)', 'inuse'], [12.8, 'Recovering', 'braking'],
+  [14.6, 'Target lowered · draining to 59%', 'draining'], [18.0, 'Holding 59%', 'holding'] ];
+const ST = {
+  charging:{col:C.amber, name:'Charging', glyph:'up'}, braking:{col:C.orange, name:'Braking', glyph:'brake'},
+  holding:{col:C.green, name:'Holding', glyph:'check'}, inuse:{col:C.blue, name:'In use', glyph:'down'},
+  draining:{col:C.purple, name:'Draining', glyph:'down'} };
+function interp(t){ t=((t%20)+20)%20; let i=0; while(i<KEYS.length-2 && KEYS[i+1][0]<=t) i++;
+  const a=KEYS[i], b=KEYS[i+1], k=(t-a[0])/(b[0]-a[0]); const e=k*k*(3-2*k);
+  return { net:a[1]+(b[1]-a[1])*e, brake:a[2]+(b[2]-a[2])*e }; }
+function phase(t){ t=((t%20)+20)%20; let p=PHASES[0]; for(const q of PHASES) if(t>=q[0]) p=q; return p; }
+
+// smooth noise
+let nz=0, nzT=0;
+function noise(dt){ nzT+=dt; nz += ((Math.sin(nzT*7.1)+Math.sin(nzT*3.3+1)+Math.sin(nzT*12.7+2))*28 - nz)*Math.min(1,dt/0.4); return nz; }
+
+// live + eased state
+const S = { t:0, net:0, brake:0, dNet:250, dBrake:0, netCol:hex(C.amber), stCol:hex(C.amber), state:'charging', label:'',
+            pct:60, hold:60, temp:37.2, quality:NaN, hist:[] , expand:0};
+function netColorFor(v){ return v>150 ? hex(C.amber) : v< -150 ? hex(C.blue) : hex(C.green); }
+function step(dt){
+  S.t += dt;
+  const v = interp(S.t), ph = phase(S.t);
+  S.net = v.net + noise(dt); S.brake = v.brake; S.state = ph[2]; S.label = ph[1];
+  const k1 = 1-Math.exp(-dt/0.35), k2 = 1-Math.exp(-dt/0.45), kc = 1-Math.exp(-dt/0.6);
+  S.dNet += (S.net - S.dNet)*k1; S.dBrake += (S.brake - S.dBrake)*k2;
+  S.netCol = mix(S.netCol, netColorFor(S.dNet), kc);
+  S.stCol = mix(S.stCol, hex(ST[S.state].col), kc);
+  const tt = ((S.t%20)+20)%20;
+  S.hold = tt >= 14.6 ? 59 : 60; S.pct = tt >= 17.2 ? 59 : 60;
+  S.temp += ((36.8 + S.dBrake*3.2) - S.temp)*(1-Math.exp(-dt/4));
+  S.quality = S.state==='holding' ? 130 : S.state==='inuse' ? 25 : S.state==='braking' ? 55 : NaN;
+  S.hist.push(S.dNet); if (S.hist.length > 300) S.hist.shift();
+}
+
+// ---------------- drawing helpers ----------------
+function fmtNet(v, compact){ const a=Math.abs(v), s=v>=0?'+':'−';
+  if (a>=1000) return s+(a/1000).toFixed(compact&&a>=10000?0:1)+'k'; return s+Math.round(a); }
+function netFrac(v){ return Math.min(1, Math.pow(Math.abs(v)/2500, 0.6)); }
+function glass(cx,cy,r,edge){
+  g.save();
+  g.shadowColor='rgba(0,0,0,0.55)'; g.shadowBlur=10; g.shadowOffsetY=3;
+  const gr=g.createRadialGradient(cx,cy-r*0.4,r*0.1,cx,cy,r);
+  gr.addColorStop(0,'rgba(38,42,50,0.96)'); gr.addColorStop(1,'rgba(14,16,20,0.96)');
+  g.fillStyle=gr; g.beginPath(); g.arc(cx,cy,r,0,TAU); g.fill(); g.restore();
+  g.strokeStyle=edge||'rgba(255,255,255,0.10)'; g.lineWidth=1; g.beginPath(); g.arc(cx,cy,r-0.5,0,TAU); g.stroke();
+}
+function track(cx,cy,r,w,a0=0,a1=TAU){ g.strokeStyle='rgba(255,255,255,0.09)'; g.lineWidth=w; g.lineCap='round'; g.beginPath(); g.arc(cx,cy,r,a0,a1); g.stroke(); }
+// arc with a conic gradient that brightens toward the moving head; dir +1 clockwise, -1 counter-clockwise
+function arcG(cx,cy,r,w,start,sweep,col,dir=1,glow=0){
+  if (sweep < 0.002) return;
+  const a0 = dir>0 ? start : start - sweep, a1 = dir>0 ? start + sweep : start;
+  const cg = g.createConicGradient(a0, cx, cy), f = Math.min(0.999, sweep/TAU);
+  const dim = rgb(mix(col,[0,0,0],0.35),0.85), br = rgb(lighten(col,0.25));
+  if (dir>0){ cg.addColorStop(0,dim); cg.addColorStop(f,br); cg.addColorStop(Math.min(1,f+0.001),dim); }
+  else { cg.addColorStop(0,br); cg.addColorStop(f,dim); cg.addColorStop(Math.min(1,f+0.001),dim); }
+  g.save();
+  if (glow>0){ g.shadowColor=rgb(col,0.9); g.shadowBlur=glow; }
+  g.strokeStyle=cg; g.lineWidth=w; g.lineCap='round'; g.beginPath(); g.arc(cx,cy,r,a0,a1); g.stroke();
+  g.restore();
+}
+function text(s,x,y,size,col,weight='700',align='center',base='middle'){
+  g.font=`${weight} ${size}px ${FONT}`; g.fillStyle=col; g.textAlign=align; g.textBaseline=base; g.fillText(s,x,y); }
+function glyph(kind,x,y,s,col){
+  g.save(); g.strokeStyle=col; g.fillStyle=col; g.lineWidth=Math.max(1.2,s*0.18); g.lineCap='round'; g.lineJoin='round'; g.beginPath();
+  if (kind==='up'){ g.moveTo(x-s*0.45,y+s*0.25); g.lineTo(x,y-s*0.3); g.lineTo(x+s*0.45,y+s*0.25); g.stroke(); }
+  else if (kind==='down'){ g.moveTo(x-s*0.45,y-s*0.25); g.lineTo(x,y+s*0.3); g.lineTo(x+s*0.45,y-s*0.25); g.stroke(); }
+  else if (kind==='check'){ g.moveTo(x-s*0.45,y); g.lineTo(x-s*0.1,y+s*0.32); g.lineTo(x+s*0.5,y-s*0.35); g.stroke(); }
+  else { // brake: bolt with a bar
+    g.moveTo(x+s*0.1,y-s*0.5); g.lineTo(x-s*0.3,y+s*0.05); g.lineTo(x,y+s*0.05); g.lineTo(x-s*0.1,y+s*0.5); g.lineTo(x+s*0.3,y-s*0.05); g.lineTo(x,y-s*0.05); g.closePath(); g.fill(); }
+  g.restore();
+}
+function qualityCol(q){ return isNaN(q) ? null : q>=60 ? C.green : q>=10 ? C.amber : C.red; }
+function pulse(){ return 0.5+0.5*Math.sin(S.t*TAU*1.1); }
+function brakeGlow(D){ return (S.state==='braking'||S.state==='draining') ? D*0.10*(0.35+0.65*pulse()) : D*0.03; }
+function unitLine(D, cx, cy){ return D>=64 ? `mW · ${S.pct}%` : 'mW'; }
+
+// ---------------- the 6 options ----------------
+// 1. Concentric dual rings: outer = net (direction + magnitude), inner = brake.
+function opt1(cx,cy,D){
+  const R=D/2; glass(cx,cy,R);
+  const w1=D*0.075, r1=R-w1/2-2.5, w2=D*0.06, r2=r1-w1/2-w2/2-2;
+  track(cx,cy,r1,w1); track(cx,cy,r2,w2);
+  arcG(cx,cy,r1,w1,TOP,netFrac(S.dNet)*TAU,S.netCol,S.dNet>=0?1:-1,D*0.08);
+  arcG(cx,cy,r2,w2,TOP,S.dBrake*TAU,hex(C.orange),1,brakeGlow(D));
+  glyph(ST[S.state].glyph,cx,cy-R*0.40,D*0.09,rgb(S.stCol));
+  text(fmtNet(S.dNet,true),cx,cy+R*0.02,D*0.235,rgb(lighten(S.netCol,0.35)));
+  text(unitLine(D),cx,cy+R*0.36,D*0.105,'rgba(255,255,255,0.55)','500');
+}
+// 2. Split ring: left half = brake (fills upward), right half = net (fills upward when gaining, downward when draining).
+function opt2(cx,cy,D){
+  const R=D/2; glass(cx,cy,R);
+  const w=D*0.09, r=R-w/2-2.5, gap=0.16;
+  track(cx,cy,r,w,Math.PI/2+gap,Math.PI*1.5-gap); track(cx,cy,r,w,-Math.PI/2+gap,Math.PI/2-gap);
+  const span=Math.PI-2*gap;
+  arcG(cx,cy,r,w,Math.PI/2+gap,S.dBrake*span,hex(C.orange),1,brakeGlow(D));            // bottom -> up the left side
+  const f=netFrac(S.dNet)*span;
+  if (S.dNet>=0) arcG(cx,cy,r,w,Math.PI/2-gap,f,S.netCol,-1,D*0.07);                     // bottom -> up the right side
+  else arcG(cx,cy,r,w,-Math.PI/2+gap,f,S.netCol,1,D*0.07);                               // top -> down the right side
+  text(fmtNet(S.dNet,true),cx,cy-R*0.04,D*0.23,rgb(lighten(S.netCol,0.35)));
+  text(D>=64?`${S.pct}% · mW`:'mW',cx,cy+R*0.32,D*0.105,'rgba(255,255,255,0.55)','500');
+  if (D>=64){ text('B',cx-R*0.58,cy-R*0.80,D*0.10,C.orange,'700'); text('N',cx+R*0.58,cy-R*0.80,D*0.10,rgb(S.netCol),'700'); }
+  const qc=qualityCol(S.quality); if (qc){ g.fillStyle=qc; g.beginPath(); g.arc(cx,cy-R*0.52,D*0.035,0,TAU); g.fill(); }
+}
+// 3. Single net ring + outer glow halo in the state colour; halo size/brightness = brake.
+function opt3(cx,cy,D){
+  const R=D/2, p=pulse();
+  const halo = R*(0.16+0.30*S.dBrake)*(S.state==='braking'||S.state==='draining' ? (0.85+0.15*p) : 1);
+  const hg=g.createRadialGradient(cx,cy,R*0.85,cx,cy,R+halo);
+  hg.addColorStop(0,rgb(S.stCol,0.55*(0.35+0.65*S.dBrake))); hg.addColorStop(1,rgb(S.stCol,0));
+  g.fillStyle=hg; g.beginPath(); g.arc(cx,cy,R+halo,0,TAU); g.fill();
+  glass(cx,cy,R,rgb(S.stCol,0.5));
+  const w=D*0.08, r=R-w/2-2.5; track(cx,cy,r,w);
+  arcG(cx,cy,r,w,TOP,netFrac(S.dNet)*TAU,S.netCol,S.dNet>=0?1:-1,D*0.06);
+  text(fmtNet(S.dNet,true),cx,cy-R*0.02,D*0.235,rgb(lighten(S.netCol,0.35)));
+  text(D>=64?`→ ${S.hold}%  ·  B ${Math.round(S.dBrake*100)}%`:`B ${Math.round(S.dBrake*100)}%`,cx,cy+R*0.36,D*0.095,'rgba(255,255,255,0.6)','500');
+}
+// 4. Minimal: number + state dot, hairline brake ring.
+function opt4(cx,cy,D){
+  const R=D/2; glass(cx,cy,R);
+  const w=2, r=R-3.5; track(cx,cy,r,w);
+  arcG(cx,cy,r,w+0.5,TOP,S.dBrake*TAU,hex(C.orange),1,brakeGlow(D)*0.6);
+  const p=pulse(), dr=D*0.055;
+  g.fillStyle=rgb(S.stCol,0.25+0.25*p); g.beginPath(); g.arc(cx,cy-R*0.50,dr*1.9,0,TAU); g.fill();
+  g.fillStyle=rgb(S.stCol); g.beginPath(); g.arc(cx,cy-R*0.50,dr,0,TAU); g.fill();
+  text(fmtNet(S.dNet,true),cx,cy+R*0.08,D*0.28,rgb(lighten(S.netCol,0.4)));
+  if (D>=64) text('mW',cx,cy+R*0.48,D*0.10,'rgba(255,255,255,0.5)','500');
+}
+// 5. Collapsed bubble (thin dual rings) that expands into a pill on tap.
+function bubble5(cx,cy,D){
+  const R=D/2; glass(cx,cy,R);
+  const w1=D*0.055, r1=R-w1/2-2.5, w2=D*0.045, r2=r1-w1/2-w2/2-1.5;
+  track(cx,cy,r1,w1); track(cx,cy,r2,w2);
+  arcG(cx,cy,r1,w1,TOP,netFrac(S.dNet)*TAU,S.netCol,S.dNet>=0?1:-1,D*0.06);
+  arcG(cx,cy,r2,w2,TOP,S.dBrake*TAU,hex(C.orange),1,brakeGlow(D));
+  text(fmtNet(S.dNet,true),cx,cy-R*0.04,D*0.24,rgb(lighten(S.netCol,0.35)));
+  text(D>=64?`${S.pct}%`:'mW',cx,cy+R*0.36,D*0.11,'rgba(255,255,255,0.55)','500');
+}
+function pill5(x,cy,Wd,Hd){
+  const R=Hd/2;
+  g.save(); g.shadowColor='rgba(0,0,0,0.55)'; g.shadowBlur=10; g.shadowOffsetY=3;
+  g.fillStyle='rgba(20,23,28,0.96)'; g.beginPath(); g.roundRect(x,cy-R,Wd,Hd,R); g.fill(); g.restore();
+  g.strokeStyle=rgb(S.stCol,0.45); g.lineWidth=1; g.beginPath(); g.roundRect(x+0.5,cy-R+0.5,Wd-1,Hd-1,R); g.stroke();
+  bubble5(x+R,cy,Hd);
+  const tx=x+Hd+8;
+  text(`${fmtNet(S.dNet)} mW`,tx,cy-R*0.52,13,rgb(lighten(S.netCol,0.35)),'700','left');
+  text(ST[S.state].name,x+Wd-12,cy-R*0.52,9.5,rgb(S.stCol),'700','right');
+  text(`Brake ${Math.round(S.dBrake*100)}% · Hold ${S.hold}%`,tx,cy-R*0.08,9.5,'rgba(255,255,255,0.75)','500','left');
+  const qc=qualityCol(S.quality);
+  text(`${S.pct}% · ${S.temp.toFixed(1)} °C`,tx,cy+R*0.30,9.5,'rgba(255,255,255,0.6)','500','left');
+  if (qc){ g.fillStyle=qc; g.beginPath(); g.arc(x+Wd-50,cy+R*0.30,2.8,0,TAU); g.fill();
+    text(S.quality>=60?'~2 h/1%':'~25 m/1%',x+Wd-12,cy+R*0.30,9,'rgba(255,255,255,0.6)','500','right'); }
+  // sparkline of net (last ~10 s)
+  const sx=tx, sw=x+Wd-12-tx, sy=cy+R*0.66, sh=7; const hs=S.hist; if (hs.length<2) return;
+  g.strokeStyle='rgba(255,255,255,0.12)'; g.lineWidth=1; g.beginPath(); g.moveTo(sx,sy); g.lineTo(sx+sw,sy); g.stroke();
+  g.strokeStyle=rgb(S.netCol,0.9); g.lineWidth=1.3; g.beginPath();
+  hs.forEach((v,i)=>{ const px=sx+i/(300-1)*sw, py=sy-Math.max(-1,Math.min(1,v/1500))*sh; i?g.lineTo(px,py):g.moveTo(px,py); }); g.stroke();
+}
+// 6. Gauge: 270° dial from −2 W (blue) through 0 (green) to +2 W (amber) with a needle; brake fills the bottom gap.
+function opt6(cx,cy,D){
+  const R=D/2; glass(cx,cy,R);
+  const w=D*0.07, r=R-w/2-3, a0=Math.PI*0.75, sweep=Math.PI*1.5;
+  const cg=g.createConicGradient(a0,cx,cy);
+  cg.addColorStop(0,C.blue); cg.addColorStop(0.375*0.86,C.green); cg.addColorStop(0.375*1.14,C.green); cg.addColorStop(0.75,C.amber); cg.addColorStop(1,C.amber);
+  g.save(); g.globalAlpha=0.85; g.strokeStyle=cg; g.lineWidth=w; g.lineCap='butt'; g.beginPath(); g.arc(cx,cy,r,a0,a0+sweep); g.stroke(); g.restore();
+  // ticks
+  g.strokeStyle='rgba(255,255,255,0.35)'; g.lineWidth=1;
+  for (let i=0;i<=4;i++){ const a=a0+sweep*i/4; g.beginPath(); g.moveTo(cx+Math.cos(a)*(r-w*0.9),cy+Math.sin(a)*(r-w*0.9)); g.lineTo(cx+Math.cos(a)*(r-w*1.6),cy+Math.sin(a)*(r-w*1.6)); g.stroke(); }
+  // brake in the bottom gap (fills right -> left)
+  const gw=D*0.06, gr=r; track(cx,cy,gr,gw,Math.PI*0.25+0.12,Math.PI*0.75-0.12);
+  arcG(cx,cy,gr,gw,Math.PI*0.25+0.12,S.dBrake*(Math.PI*0.5-0.24),hex(C.orange),1,brakeGlow(D));
+  // needle
+  const v=Math.max(-2000,Math.min(2000,S.dNet)), a=a0+sweep*(v+2000)/4000, L=r-w*0.6;
+  g.save(); g.shadowColor=rgb(S.netCol,0.9); g.shadowBlur=D*0.08;
+  g.strokeStyle='#fff'; g.lineWidth=Math.max(1.6,D*0.03); g.lineCap='round';
+  g.beginPath(); g.moveTo(cx-Math.cos(a)*R*0.10,cy-Math.sin(a)*R*0.10); g.lineTo(cx+Math.cos(a)*L,cy+Math.sin(a)*L); g.stroke(); g.restore();
+  g.fillStyle=rgb(S.netCol); g.beginPath(); g.arc(cx,cy,D*0.045,0,TAU); g.fill();
+  text(fmtNet(S.dNet,true),cx,cy+R*0.40,D*0.17,rgb(lighten(S.netCol,0.35)));
+}
+
+// ---------------- Spotify-like background ----------------
+const tracks = [['Midnight Drive','Neon Coast'],['Paper Planes','Lumen'],['Afterglow','The Tides'],['Low Battery','Volt & Echo'],
+  ['Slow Burn','Mira Kade'],['Holding On','Northbound'],['Static Hearts','Cassette Club'],['Run It Back','Juno Park'],['Golden Hour','Sola'],['Night Shift','Arcadia']];
+function background(){
+  g.fillStyle='#121212'; g.fillRect(0,0,W,H);
+  const bg=g.createLinearGradient(0,0,0,330); bg.addColorStop(0,'#4b2a7a'); bg.addColorStop(1,'#121212');
+  g.fillStyle=bg; g.fillRect(0,0,W,330);
+  text('9:41',18,13,11,'#fff','600','left'); text('▾',W-20,13,10,'#fff','600');
+  // header
+  const ag=g.createLinearGradient(20,40,110,130); ag.addColorStop(0,'#7b4ad8'); ag.addColorStop(1,'#c9a7ff');
+  g.fillStyle=ag; g.fillRect(20,38,84,84); text('♥',62,80,34,'#fff','700');
+  text('Liked Songs',118,62,22,'#fff','800','left'); text('412 songs',118,86,12,'rgba(255,255,255,0.7)','500','left');
+  g.fillStyle='#1ED760'; g.beginPath(); g.arc(W-38,108,20,0,TAU); g.fill();
+  g.fillStyle='#000'; g.beginPath(); g.moveTo(W-44,98); g.lineTo(W-29,108); g.lineTo(W-44,118); g.closePath(); g.fill();
+  // track list
+  for (let i=0;i<tracks.length;i++){
+    const y=150+i*58; const hue=(i*47)%360;
+    g.fillStyle=`hsl(${hue},45%,38%)`; g.fillRect(20,y,44,44);
+    text(tracks[i][0],76,y+15,13,i===3?'#1ED760':'#fff','500','left'); text(tracks[i][1],76,y+33,11,'rgba(255,255,255,0.6)','400','left');
+    text('⋯',W-24,y+22,14,'rgba(255,255,255,0.6)','700');
+  }
+  // mini player + nav
+  g.fillStyle='#3a2a52'; g.beginPath(); g.roundRect(8,728,W-16,56,8); g.fill();
+  g.fillStyle='hsl(141,45%,38%)'; g.fillRect(16,736,40,40);
+  text('Low Battery',64,750,12,'#fff','600','left'); text('Volt & Echo',64,767,10.5,'rgba(255,255,255,0.7)','400','left');
+  text('❚❚',W-34,756,14,'#fff','700');
+  g.fillStyle='rgba(255,255,255,0.25)'; g.fillRect(16,780,W-32,2); g.fillStyle='#fff'; g.fillRect(16,780,(W-32)*((S.t%20)/20*0.6+0.2),2);
+  g.fillStyle='#0d0d0d'; g.fillRect(0,792,W,58);
+  ['Home','Search','Your Library'].forEach((s,i)=>text(s,W*(i+0.5)/3,826,10.5,i===2?'#fff':'rgba(255,255,255,0.6)','500'));
+  // subtle dim so the bubbles read like an overlay
+  g.fillStyle='rgba(0,0,0,0.28)'; g.fillRect(0,0,W,H);
+}
+
+// ---------------- layout ----------------
+function badge(n,x,y,title){
+  g.save(); g.shadowColor='rgba(0,0,0,0.6)'; g.shadowBlur=6;
+  g.fillStyle='#fff'; g.beginPath(); g.arc(x,y,13,0,TAU); g.fill(); g.restore();
+  text(String(n),x,y+1,18,'#111','900');
+  g.font=`700 11px ${FONT}`; const tw=g.measureText(title).width;
+  g.fillStyle='rgba(10,11,14,0.78)'; g.beginPath(); g.roundRect(x+15,y-9,tw+12,18,9); g.fill();
+  text(title,x+21,y+1,11,'rgba(255,255,255,0.95)','700','left');
+}
+function sizeLbl(s,x,y){ text(s,x,y,9,'rgba(255,255,255,0.55)','500'); }
+function cellPair(fn,x0,y0){ // 72 dp + 56 dp versions side by side in a 180 dp cell
+  fn(x0+52,y0+78,72); sizeLbl('72 dp',x0+52,y0+128);
+  fn(x0+136,y0+86,56); sizeLbl('56 dp',x0+136,y0+128);
+}
+function legend(x,y){
+  const rows=[[C.orange,'brake ring: 0–100 %'],[C.amber,'net: gaining'],[C.green,'net: steady (±150 mW)'],[C.blue,'net: draining']];
+  g.fillStyle='rgba(12,13,16,0.82)'; g.beginPath(); g.roundRect(x,y,164,104,10); g.fill();
+  text('DEMO',x+10,y+14,9,'rgba(255,255,255,0.5)','700','left');
+  text(S.label,x+10,y+29,10.5,rgb(S.stCol),'700','left');
+  rows.forEach((r,i)=>{ g.fillStyle=r[0]; g.beginPath(); g.roundRect(x+10,y+44+i*14,14,4,2); g.fill(); text(r[1],x+30,y+46+i*14,9,'rgba(255,255,255,0.75)','500','left'); });
+}
+function render(){
+  g.setTransform(DPR,0,0,DPR,0,0);
+  background();
+  g.fillStyle='rgba(10,11,14,0.80)'; g.beginPath(); g.roundRect(26,27,W-52,36,10); g.fill();
+  text('Charge Brake · floating bubble options',W/2,40,12.5,'#fff','800');
+  text('over Spotify · cover screen 360 dp · tap a bubble to open the app',W/2,56,9.5,'rgba(255,255,255,0.6)','500');
+  let y=74;
+  badge(1,18,y,'Dual rings'); cellPair(opt1,0,y);
+  badge(2,198,y,'Split ring'); cellPair(opt2,180,y);
+  y+=158;
+  badge(3,18,y,'Ring + glow halo'); cellPair(opt3,0,y);
+  badge(4,198,y,'Minimal dot + number'); cellPair(opt4,180,y);
+  y+=158;
+  badge(5,18,y,'Bubble → pill on tap (collapsed · expanded)');
+  bubble5(50,y+70,72); sizeLbl('72 dp',50,y+118);
+  bubble5(120,y+78,56); sizeLbl('56 dp',120,y+118);
+  pill5(158,y+76,190,64); sizeLbl('expanded (tap) · 190 × 64 dp',253,y+118);
+  y+=144;
+  badge(6,18,y,'Gauge needle'); cellPair(opt6,0,y);
+  legend(186,y+14);
+}
+
+// ---------------- loop ----------------
+const manual = new URLSearchParams(location.search).has('manual');
+window.__advance = dt => { const n=Math.max(1,Math.round(dt/(1/120))); for(let i=0;i<n;i++) step(dt/n); render(); };
+window.__seek = t => { S.t=0; for(let i=0;i<t*120;i++) step(1/120); render(); };
+if (!manual){ let last=performance.now(); (function f(now){ const dt=Math.min(0.1,(now-last)/1000); last=now; step(dt); render(); requestAnimationFrame(f); })(last); }
+else render();
+</script></body></html>

@@ -112,7 +112,7 @@ class ControllerSimTest {
         name, r.meanNet, r.sdNet, r.meanBurn * 100, r.jitter * 100, r.pctMin, r.pctMax, r.mahErrMax, r.mahErrEnd, r.useTrig)
 
     @Test fun holdWithFieldNoise() {
-        println("=== Charge Brake v0.3 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===")
+        println("=== Charge Brake v0.4 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===")
         for ((name, p) in listOf(
             "field: surplus +700 mW, gain 1.2 W" to FakePhone(1),
             "weak burn gain 0.8 W" to FakePhone(2, burnGain = 800f, steadyMw = 1500f),

@@ -19,6 +19,7 @@ import java.util.Locale
 /** Settings, raw sensor values and the CSV log. */
 class DetailsActivity : Activity() {
     private lateinit var tv: TextView
+    private lateinit var costTv: TextView
     private lateinit var modeRow: LinearLayout
     private lateinit var drainRow: FlowRow
     private lateinit var batBtn: TextView
@@ -54,6 +55,9 @@ class DetailsActivity : Activity() {
             setOnCheckedChangeListener { _, on -> Monitor.invert = on; Monitor.changed("invert", on) }
         }, dp(14))
         batBtn = button("Battery optimisation") { reqBat() }; col.add(batBtn, dp(14))
+        section("APP'S OWN POWER (ESTIMATE)")
+        costTv = text(13f, C_TXT); col.add(costTv, dp(8))
+        col.add(text(11.5f, C_FAINT, txt = "Estimate: the 10 min average of net + brake power with this app's main screen in front (Eco or Live) minus the same with the app in the background, screen on. Includes the screen content drawing, not the display itself; charger and phone-use changes add noise."), dp(4))
         section("SENSOR")
         tv = text(12.5f, C_TXT, mono = true); col.add(tv, dp(8))
         col.add(button("Share log (CSV)", 0xFF00838F.toInt()) { share() }, dp(14))
@@ -98,6 +102,14 @@ class DetailsActivity : Activity() {
 
     private fun refresh() {
         val m = Monitor; val c = m.ctl; val f = m.cfg
+        val pl = m.plugged != 0
+        fun one(mode: Int, name: String): String {
+            val v = m.cost.cost(mode, pl)
+            val mins = m.cost.seconds(mode, pl) / 60f
+            return if (v.isNaN()) String.format(Locale.US, "%s: measuring (%.0f of 1 min)", name, minOf(mins, 1f) * 1f) else String.format(Locale.US, "%s: ~%s mW (%.0f min of data)", name, fmtInt(v), mins)
+        }
+        costTv.text = (if (pl) "Plugged in" else "On battery") + String.format(Locale.US, " · background (screen on): %.0f min of data\n", m.cost.seconds(Monitor.UI_NONE, pl) / 60f) +
+            one(Monitor.UI_ECO, "Eco view") + "\n" + one(Monitor.UI_LIVE, "Live view")
         tv.text = String.format(Locale.US, """
             raw CURRENT_NOW   %d
             raw CURRENT_AVG   %d
