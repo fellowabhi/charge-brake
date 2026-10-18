@@ -19,14 +19,16 @@ import kotlin.math.abs
 
 /** Samples the battery every 250 ms, runs the controller when enabled, keeps history + CSV log. */
 object Monitor {
-    const val VERSION = "0.2"
-    const val VERSION_CODE = 2
+    const val VERSION = "0.3"
+    const val VERSION_CODE = 3
     const val TICK_MS = 250L
     val cfg = Cfg()
     val ctl = Controller(cfg)
     val burner = Burner()
     val mahT = MahTracker()
     val hist = History(1200)                 // 5 min @ 250 ms
+    val lhist = ChargeHistory(5400)          // 3 h @ 2 s (charge graph)
+    const val AVG_S = 1.5f                   // display smoothing of the big number / white line
     private val log = ArrayDeque<String>()   // 1 Hz rows + events, last ~4 h
     private const val LOG_CAP = 15_000
     val listeners = CopyOnWriteArrayList<() -> Unit>()
@@ -35,6 +37,7 @@ object Monitor {
     var threads = 4
     var invert = false
     var ratedMah = 4860f; var ratedSrc = "spec"
+    private var holdSrc = ""; private var savedHoldMah = Float.NaN
     // detection
     var unitUa = false; var unitKnown = false
     var flip = false; var signKnown = false
@@ -45,7 +48,11 @@ object Monitor {
     // live values
     @Volatile var raw = 0; var rawAvg = 0; var supported = true
     @Volatile var mA = 0f; var volt = 0f; var mW = 0f; var temp = 0f
-    @Volatile var avgMw = 0f                 // 3 s average for the big number
+    @Volatile var avgMw = 0f                 // 1.5 s average for the big number
+    // phone-use estimate
+    @Volatile var phoneUse = Float.NaN; @Volatile var chargerEst = Float.NaN
+    var useBase = Float.NaN                  // phone use measured while unplugged (persisted)
+    private var surSlow = Float.NaN; private var lastPlugged = -1; private var lastL = 0L
     @Volatile var pct = 0; var plugged = 0; var status = 0; var health = 0
     var chargeCounter = 0; var maxChgUa = -1; var maxChgUv = -1
     @Volatile var rateHz = 0f; var mwOk = false; var lastChange = 0L
@@ -80,12 +87,12 @@ object Monitor {
             cfg.mode = getInt("mode", Mode.AUTO); cfg.holdCurrent = getBoolean("holdCur", true)
             cfg.targetPct = getInt("tPct", 60); cfg.targetMw = getInt("tMw", 100)
             cfg.fastCutoffMw = getInt("fast2", 6000); cfg.tempCutoffC = getFloat("temp2", 45f)
-            cfg.aggr = getInt("aggr", 3); cfg.maxBurn = getFloat("maxBurn", 0.8f)
+            cfg.aggr = getInt("aggr", 3); cfg.maxBurn = getFloat("maxBurn", 0.8f); cfg.drainSpeed = getInt("drain", Drain.NORMAL)
             cfg.capacityMah = getFloat("cap", ratedMah)
             threads = getInt("threads", 4); invert = getBoolean("invert", false)
             unitUa = getBoolean("ua", false); unitKnown = getBoolean("uaKnown", false)
             flip = getBoolean("flip", false); signKnown = getBoolean("signKnown", false)
-            ctl.holdPct = getInt("hold", -1)
+            ctl.holdPct = getInt("hold", -1); ctl.holdMah = getFloat("holdMah", Float.NaN); holdSrc = getString("holdSrc", "") ?: ""; useBase = getFloat("useBase", Float.NaN)
         }
         cfg.burnMwFull = 1500f * threads / 4f
         t0 = SystemClock.elapsedRealtime()
@@ -101,12 +108,12 @@ object Monitor {
     fun save() {
         prefs.edit().putInt("mode", cfg.mode).putBoolean("holdCur", cfg.holdCurrent)
             .putInt("tPct", cfg.targetPct).putInt("tMw", cfg.targetMw).putInt("fast2", cfg.fastCutoffMw)
-            .putFloat("temp2", cfg.tempCutoffC).putInt("aggr", cfg.aggr).putFloat("maxBurn", cfg.maxBurn)
+            .putFloat("temp2", cfg.tempCutoffC).putInt("aggr", cfg.aggr).putFloat("maxBurn", cfg.maxBurn).putInt("drain", cfg.drainSpeed)
             .putFloat("cap", cfg.capacityMah)
             .putInt("threads", threads).putBoolean("invert", invert)
             .putBoolean("ua", unitUa).putBoolean("uaKnown", unitKnown)
             .putBoolean("flip", flip).putBoolean("signKnown", signKnown)
-            .putInt("hold", ctl.holdPct).putBoolean("enabled", enabled).apply()
+            .putInt("hold", ctl.holdPct).putFloat("holdMah", ctl.holdMah).putString("holdSrc", holdSrc).putBoolean("enabled", enabled).apply()
     }
 
     /** A user setting changed: save, log an event row, and re-target if it affects the hold. */
@@ -141,11 +148,23 @@ object Monitor {
         h?.post {
             if (on && !enabled) {
                 ctl.paused = false
-                ctl.arm(pct, mahT.mah, keepHold = resume); burner.start(threads); enabled = true; event("brake on")
+                if (resume && holdSrc != mahT.source) ctl.holdMah = Float.NaN   // saved mAh is on another scale
+                ctl.arm(pct, mahT.mah, keepHold = resume); holdSrc = mahT.source; savedHoldMah = ctl.holdMah
+                burner.start(threads); enabled = true
+                event(if (resume) "brake on (resumed, hold ${ctl.holdPct}%)" else "brake on (hold locked ${ctl.hold()}%)")
             } else if (!on && enabled) {
                 enabled = false; ctl.disarm(); burner.stop(); event("brake off")
             }
             save()
+        }
+    }
+
+    /** User tapped Hold current: lock the hold at the level now (the only other time is enabling the brake). */
+    fun relockHold() {
+        cfg.holdCurrent = true
+        h?.post {
+            ctl.lockHold(pct, mahT.mah); holdSrc = mahT.source; ctl.retarget(pct, mahT.mah); savedHoldMah = ctl.holdMah
+            save(); event(String.format(Locale.US, "hold locked %d%% / %.1f mAh", ctl.holdPct, ctl.holdMah))
         }
     }
 
@@ -208,43 +227,75 @@ object Monitor {
         mA = if (flip xor invert) -m else m
         mW = mA * volt
         mwOk = supported && r != 0 && volt > 2.5f && now - lastChange < 30_000 && abs(mW) < 30_000
-        avgMw += (mW - avgMw) * dt / (3f + dt)
+        avgMw += (mW - avgMw) * dt / (AVG_S + dt)
+        estimateUse(dt)
 
         if (mahT.update(now, chargeCounter, mA, mwOk, pct, cfg.capacityMah) && enabled) {
-            ctl.retarget(pct, mahT.mah); event("mAh source -> ${mahT.source}")
+            ctl.rebase(pct, mahT.mah); event("mAh source -> ${mahT.source}")
         }
 
         var b = 0f
         if (enabled) {
             b = ctl.step(Input(now, mW, mwOk, pct, plugged != 0, temp, mahT.mah))
             burner.level = b
+            if (ctl.holdMah.toBits() != savedHoldMah.toBits()) { savedHoldMah = ctl.holdMah; holdSrc = mahT.source; save() }
         }
         hist.add(now, mW, avgMw, b, if (enabled) ctl.tgtMw else 0f, pct, mahT.mah, if (enabled) ctl.targetMah else Float.NaN)
-        if (now - lastLog >= 1000) { lastLog = now; addLog(now, b, "") }
+        if (now - lastL >= 2000) { lastL = now; lhist.add(now, mahT.mah, if (enabled) ctl.targetMah else Float.NaN, pct, state) }
+        if (now - lastLog >= 1000) { lastLog = now; updateDrift(); addLog(now, b, "") }
     }
 
+    /** Phone use (est.): unplugged = −net. Plugged = charger estimate − net − brake, where the charger estimate is
+     *  the slow (3 min) average surplus plus the phone use last measured on battery. */
+    private fun estimateUse(dt: Float) {
+        if (plugged != lastPlugged) {
+            if (lastPlugged == 0 && plugged != 0 && !useBase.isNaN()) prefs.edit().putFloat("useBase", useBase).apply()
+            lastPlugged = plugged; surSlow = Float.NaN
+        }
+        if (!mwOk) return
+        if (plugged == 0) {
+            useBase = if (useBase.isNaN()) -mW else useBase + (-mW - useBase) * dt / (30f + dt)
+            phoneUse = -avgMw; chargerEst = Float.NaN
+        } else {
+            val sur = mW + burnMw
+            surSlow = if (surSlow.isNaN()) sur else surSlow + (sur - surSlow) * dt / (180f + dt)
+            if (useBase.isNaN()) { phoneUse = Float.NaN; chargerEst = Float.NaN; return }
+            chargerEst = surSlow + useBase.coerceAtLeast(0f)
+            phoneUse = chargerEst - avgMw - burnMw
+        }
+    }
+
+    // ---- hold quality: 5 min mean of the net power while holding -> time to drift 1 % ----
+    private val drift = DriftMeter()
+    val driftMw get() = drift.mw
+    val driftNoise get() = drift.noise
+    val minPerPct get() = drift.minPerPct
+    val driftReason get() = drift.reason
+    val holdingNow get() = enabled && !ctl.paused && when (ctl.st) { St.HOLDING, St.BRAKING, St.IN_USE, St.IDLE -> true; else -> false }
+    private fun updateDrift() { if (!holdingNow) drift.reset() else if (mwOk) drift.add(mW, volt, cfg.capacityMah, ctl.burn, cfg.maxBurn) }
+
     private val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-    private const val COLS = "time,elapsed_s,event,raw_current_now,raw_current_avg,mA,V,mW,avg3s_mW,ema_mW,ema_use_mW,target_mW,burn,pct,mAh,target_mAh,mAh_source,charge_counter,temp_C,plugged,status,state,enabled,paused,hold_pct,mode,eff_mode,hold_mode,target_pct,temp_cutoff,fast_cutoff_mW,fast_avg_mW,aggr,max_burn,threads,capacity,sensor_hz,mw_ok,unit_ua,flip,invert"
+    private const val COLS = "time,elapsed_s,event,raw_current_now,raw_current_avg,mA,V,mW,avg_mW,phone_use_est_mW,ema_mW,ema_use_mW,target_mW,burn,pct,mAh,target_mAh,mAh_source,charge_counter,temp_C,plugged,status,state,enabled,paused,hold_pct,mode,eff_mode,hold_mode,target_pct,temp_cutoff,fast_cutoff_mW,fast_avg_mW,aggr,max_burn,threads,capacity,sensor_hz,mw_ok,unit_ua,flip,invert,drain_speed,hold_drift_mW,hold_min_per_pct"
 
     fun event(e: String) { h?.post { addLog(SystemClock.elapsedRealtime(), ctl.burn, e) } ?: addLog(SystemClock.elapsedRealtime(), ctl.burn, e) }
 
     private fun addLog(now: Long, b: Float, ev: String) {
         val row = String.format(Locale.US,
-            "%s,%.1f,%s,%d,%d,%.1f,%.3f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%d,%.1f,%.1f,%s,%d,%.1f,%d,%d,%s,%b,%b,%d,%s,%s,%s,%d,%.1f,%d,%.0f,%d,%.2f,%d,%.0f,%.2f,%b,%b,%b,%b",
-            df.format(Date()), (now - t0) / 1000f, ev.replace(',', ';'), raw, rawAvg, mA, volt, mW, avgMw, ctl.emaSlow, ctl.emaUse, ctl.tgtMw, b, pct,
+            "%s,%.1f,%s,%d,%d,%.1f,%.3f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%d,%.1f,%.1f,%s,%d,%.1f,%d,%d,%s,%b,%b,%d,%s,%s,%s,%d,%.1f,%d,%.0f,%d,%.2f,%d,%.0f,%.2f,%b,%b,%b,%b,%s,%.0f,%.0f",
+            df.format(Date()), (now - t0) / 1000f, ev.replace(',', ';'), raw, rawAvg, mA, volt, mW, avgMw, phoneUse, ctl.emaSlow, ctl.emaUse, ctl.tgtMw, b, pct,
             mahT.mah, ctl.targetMah, mahT.source, chargeCounter, temp, plugged, status, state.name, enabled, ctl.paused, ctl.hold(),
             Mode.name(cfg.mode), Mode.name(ctl.effMode), if (cfg.holdCurrent) "current" else "target", cfg.targetPct, cfg.tempCutoffC,
             cfg.fastCutoffMw, ctl.fastMw, cfg.aggr, cfg.maxBurn, burner.threads, cfg.capacityMah, rateHz, mwOk,
-            unitUa || maxAbs > 15_000, flip, invert)
+            unitUa || maxAbs > 15_000, flip, invert, Drain.name(cfg.drainSpeed), driftMw, minPerPct)
         synchronized(log) { log.addLast(row); if (log.size > LOG_CAP) log.removeFirst() }
     }
 
     fun csv(): String = synchronized(log) {
         buildString {
             append("# Charge Brake v$VERSION (code $VERSION_CODE) · ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}\n")
-            append(String.format(Locale.US, "# capacity %.0f mAh (rated %.0f from %s) · temp cutoff %.1f C · fast cutoff %d mW (10 s avg, 2 min retry) · mode %s · hold %s %d%% · aggr %d · max burn %.2f · threads %d\n",
-                cfg.capacityMah, ratedMah, ratedSrc, cfg.tempCutoffC, cfg.fastCutoffMw, Mode.name(cfg.mode),
-                if (cfg.holdCurrent) "current" else "target", ctl.hold(), cfg.aggr, cfg.maxBurn, threads))
+            append(String.format(Locale.US, "# capacity %.0f mAh (rated %.0f from %s) · temp cutoff %.1f C · fast cutoff %d mW (10 s avg, 2 min retry) · avg_mW = %.1f s average · mode %s · hold %s %d%% · aggr %d · max burn %.2f · threads %d · drain %s\n",
+                cfg.capacityMah, ratedMah, ratedSrc, cfg.tempCutoffC, cfg.fastCutoffMw, AVG_S, Mode.name(cfg.mode),
+                if (cfg.holdCurrent) "current" else "target", ctl.hold(), cfg.aggr, cfg.maxBurn, threads, Drain.name(cfg.drainSpeed)))
             append(COLS).append('\n'); log.forEach { append(it).append('\n') }
         }
     }

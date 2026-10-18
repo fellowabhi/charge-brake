@@ -16,3 +16,17 @@ class History(val cap: Int) {
         if (size < cap) size++
     }
 }
+
+/** Long, slow history for the charge graph (mAh, target mAh, %, state). */
+class ChargeHistory(val cap: Int) {
+    val t = LongArray(cap); val mah = FloatArray(cap); val tmah = FloatArray(cap); val pct = IntArray(cap)
+    val st = arrayOfNulls<St>(cap)
+    var size = 0; private set
+    private var head = 0
+    fun idx(k: Int) = (head - size + k + 2 * cap) % cap
+    @Synchronized fun add(tt: Long, m: Float, tm: Float, p: Int, s: St) {
+        t[head] = tt; mah[head] = m; tmah[head] = tm; pct[head] = p; st[head] = s
+        head = (head + 1) % cap
+        if (size < cap) size++
+    }
+}

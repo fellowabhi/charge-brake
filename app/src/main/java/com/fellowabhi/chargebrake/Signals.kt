@@ -67,3 +67,30 @@ class MahTracker {
 
     companion object { const val SRC_GAUGE = "fuel gauge"; const val SRC_COUNT = "counted" }
 }
+
+/** Hold quality: 5 min mean of the net power (1 Hz samples) -> minutes to drift 1 % of capacity. */
+class DriftMeter(private val window: Int = 300) {
+    private val win = ArrayDeque<Float>()
+    var mw = Float.NaN; private set           // mean net (mW)
+    var noise = 0f; private set               // 2 standard errors of the mean (min 15 mW)
+    var minPerPct = Float.NaN; private set    // +Inf = steady (within noise); NaN = measuring / not holding
+    var reason = ""; private set
+    fun reset() { win.clear(); mw = Float.NaN; minPerPct = Float.NaN; reason = "" }
+    fun add(netMw: Float, volt: Float, capMah: Float, burn: Float, maxBurn: Float) {
+        win.addLast(netMw); while (win.size > window) win.removeFirst()
+        val n = win.size
+        val mean = win.average().toFloat()
+        val sd = kotlin.math.sqrt(win.sumOf { ((it - mean) * (it - mean)).toDouble() } / maxOf(1, n - 1)).toFloat()
+        mw = mean; noise = maxOf(15f, 2f * sd / kotlin.math.sqrt(n.toFloat()))
+        if (n < 60) { minPerPct = Float.NaN; reason = "measuring"; return }
+        if (kotlin.math.abs(mean) < noise) { minPerPct = Float.POSITIVE_INFINITY; reason = ""; return }
+        minPerPct = capMah / 100f / (kotlin.math.abs(mean) / volt.coerceAtLeast(3f)) * 60f
+        reason = when {
+            minPerPct >= 10f -> ""
+            mean > 0 && burn >= maxBurn - 0.02f -> "charger too strong, brake maxed"
+            mean < 0 && burn < 0.03f -> "charger too weak, draining"
+            mean > 0 -> "brake still catching up"
+            else -> "phone use above the charger"
+        }
+    }
+}

@@ -20,6 +20,7 @@ import java.util.Locale
 class DetailsActivity : Activity() {
     private lateinit var tv: TextView
     private lateinit var modeRow: LinearLayout
+    private lateinit var drainRow: FlowRow
     private lateinit var batBtn: TextView
     private val tick: () -> Unit = { refresh() }
 
@@ -37,6 +38,9 @@ class DetailsActivity : Activity() {
         slider(col, "Target level", 20, 100, 1, cfg.targetPct, { "$it%" }) { cfg.targetPct = it; Monitor.changed("target_pct", it, true) }
         slider(col, "Battery capacity", 2000, 7000, 10, cfg.capacityMah.toInt(), { "$it mAh" }) { cfg.capacityMah = it.toFloat(); Monitor.changed("capacity", it, true) }
         col.add(text(11.5f, C_FAINT, txt = String.format(Locale.US, "Rated %.0f mAh (%s). Used for %% → mAh and counting.", Monitor.ratedMah, Monitor.ratedSrc)), dp(2))
+        col.add(text(14f, C_DIM, txt = "Drain speed (when the target is below the current level)"), dp(14))
+        drainRow = FlowRow(this, dp(6), dp(6)); col.add(drainRow, dp(8)); updDrain()
+        col.add(text(11.5f, C_FAINT, txt = "Gentle −150 mW · Normal −400 mW · Fast = max brake (still paused at the temperature cutoff). How fast it really drains depends on the charger: on a 5 W charger even max brake may only reach about −300 mW."), dp(6))
         slider(col, "Fallback net target (no mAh)", -200, 500, 25, cfg.targetMw, { "%+d mW".format(it) }) { cfg.targetMw = it; Monitor.changed("target_mW", it) }
         section("BRAKE")
         slider(col, "Aggressiveness", 1, 5, 1, cfg.aggr, { "$it" }) { cfg.aggr = it; Monitor.changed("aggr", it) }
@@ -60,6 +64,13 @@ class DetailsActivity : Activity() {
 
     private fun button(label: String, bg: Int = C_CARD, onClick: () -> Unit) = text(15f, C_TXT, txt = label).apply {
         setPadding(dp(16), dp(14), dp(16), dp(14)); background = round(bg, dpf(12f)); setOnClickListener { onClick() }
+    }
+
+    private fun updDrain() {
+        drainRow.removeAllViews()
+        listOf(Drain.GENTLE, Drain.NORMAL, Drain.FAST).forEach { d ->
+            drainRow.addView(chip("${Drain.name(d)} (${Drain.desc(d)})", Monitor.cfg.drainSpeed == d) { Monitor.cfg.drainSpeed = d; Monitor.changed("drain_speed", Drain.name(d)); updDrain() })
+        }
     }
 
     private fun updMode() {
@@ -92,7 +103,10 @@ class DetailsActivity : Activity() {
             raw CURRENT_AVG   %d
             unit / sign       %s · flip %b (verified %b) · invert %b
             current           %+.1f mA @ %.3f V
-            power             %+.0f mW (3 s avg %+.0f)
+            power             %+.0f mW (1.5 s avg %+.0f)
+            phone use (est.)  %.0f mW · charger est. %.0f mW
+            hold quality      drift %.0f mW (±%.0f) · %.0f min per 1 %% %s
+            use on battery    %.0f mW (calibration)
             mW reading ok     %b · %.2f Hz · changed %d ms ago
             charge counter    %d (gauge %.1f mAh)
             mAh               %.1f · source %s
@@ -103,7 +117,7 @@ class DetailsActivity : Activity() {
 
             state             %s %s
             mode / effective  %s / %s
-            hold              %s %d %%
+            hold              %s %d %% · drain %s (draining %b)
             target power      %+.0f mW
             ema slow / use    %+.0f / %+.0f mW
             brake             %.1f %% x %d threads (~%.0f mW)
@@ -111,10 +125,10 @@ class DetailsActivity : Activity() {
             sensor period     %.2f s (controller est.)
             log rows          %d
         """.trimIndent(),
-            m.raw, m.rawAvg, if (m.unitUa) "µA" else "mA", m.flip, m.signKnown, m.invert, m.mA, m.volt, m.mW, m.avgMw,
+            m.raw, m.rawAvg, if (m.unitUa) "µA" else "mA", m.flip, m.signKnown, m.invert, m.mA, m.volt, m.mW, m.avgMw, m.phoneUse, m.chargerEst, m.driftMw, m.driftNoise, m.minPerPct, m.driftReason, m.useBase,
             m.mwOk, m.rateHz, SystemClock.elapsedRealtime() - m.lastChange, m.chargeCounter, m.mahT.gaugeMah, m.mah, m.mahT.source,
             c.targetMah, m.pct, m.temp, plugName(m.plugged), m.status, m.health, m.maxChgUa, m.maxChgUv,
-            m.state.name, if (c.paused) "(paused)" else "", Mode.name(f.mode), Mode.name(c.effMode), if (f.holdCurrent) "current" else "target", c.hold(),
+            m.state.name, if (c.paused) "(paused)" else "", Mode.name(f.mode), Mode.name(c.effMode), if (f.holdCurrent) "current" else "target", c.hold(), Drain.name(f.drainSpeed), c.draining,
             c.tgtMw, c.emaSlow, c.emaUse, c.burn * 100, m.burner.threads, m.burnMw, c.fastMw, f.fastCutoffMw, c.fastRetryInS, c.ignoreFast,
             c.sensorPeriodS, m.logRows())
     }

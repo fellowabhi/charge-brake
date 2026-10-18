@@ -4,6 +4,17 @@ Android app that holds your battery level on a slow charger, without root.
 It reads live battery power and, when the phone is gaining charge, adds just enough
 low-priority CPU load ("brake") to keep net power around 0. No ads, no analytics, no internet permission.
 
+**v0.3**
+- Tiles never clip (2×2 grid, auto-size values, scrolls instead of squashing); checked at cover, inner (landscape/portrait) and split-screen sizes.
+- Power graph ≈ 50 % of the screen height; new **Charge graph** (mAh from the fuel gauge or counted) with the hold/target line: climbs to the target when charging up, flat on it when holding.
+- Net-zero band only while holding (dimmed + labelled while charging up / draining).
+- Banner: Start / Resume / Ignore button in the banner. States: Charging up to X% (Y mAh to go) · Holding X% · Draining to X% (~Y mAh to go) · Paused · Off: fast charging.
+- Target controls on the main screen (Hold current / Target − 60% +).
+- **Drain speed** when the target is below the level: Gentle −150 mW, Normal −400 mW (default), Fast = max brake (temperature cutoff still applies).
+- **Hold current is locked** (% and mAh) when you enable the brake or tap Hold current; a dip below it charges back up to it. Survives service restarts.
+- **Hold quality** tile (while holding): 5 min mean net → time to drift 1 % (e.g. "~2 h 10 m per 1%"), ∞ · steady when within noise; green ≥ 1 h (excellent ≥ 1 h 30 m), amber 10 min–1 h, red < 10 min with the reason. Logged in the CSV.
+- Big number smoothing 1.5 s (controller filtering unchanged). Phone use (est.) line: on battery = −net; plugged = charger estimate − net − brake (charger estimate = 3 min average surplus + use last measured on battery).
+
 **v0.2**
 - **UI**: cover screen = single column; inner (unfolded) screen = graph | values panel | details row. Switches live on fold/unfold.
   Eased numbers, scrolling chart, state glows (braking orange, holding green, in use blue, charging amber, off red/grey), LIVE dot.

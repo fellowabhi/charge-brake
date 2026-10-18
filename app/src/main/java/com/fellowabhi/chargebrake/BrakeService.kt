@@ -69,10 +69,7 @@ class BrakeService : Service() {
         val stop = PendingIntent.getService(this, 1, Intent(this, BrakeService::class.java).setAction(ACTION_STOP), pi)
         val pause = PendingIntent.getService(this, 2, Intent(this, BrakeService::class.java).setAction(ACTION_PAUSE), pi)
         val brake = (c.burn * 100).toInt()
-        val title = when (st) {
-            St.BRAKING, St.HOLDING, St.IDLE, St.IN_USE -> "${Look.title(st, m).lowercase(Locale.US).replaceFirstChar { it.uppercase() }.substringBefore(" ")} · brake $brake% · hold ${c.hold()}%"
-            else -> Look.title(st, m).lowercase(Locale.US).replaceFirstChar { it.uppercase() }
-        }
+        val title = Look.title(st, m) + when (st) { St.BRAKING, St.HOLDING, St.IDLE, St.IN_USE, St.DRAINING -> " · brake $brake%"; else -> "" }
         val sur = if (m.plugged == 0) "n/a" else "~" + fmtSigned(m.avgMw + m.burnMw) + " mW"
         val text = String.format(Locale.US, "%s mW net · surplus %s · %.1f °C · %d%%", fmtSigned(m.avgMw), sur, m.temp, m.pct)
         return Notification.Builder(this, CH)

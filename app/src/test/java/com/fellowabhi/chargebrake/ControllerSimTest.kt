@@ -25,7 +25,9 @@ class FakePhone(
     startPct: Float = 60.5f,
     val capMah: Float = 4860f,
     val gauge: Boolean = true,
+    val heatC: Float = 0f,          // °C rise at burn = 1.0 (thermal lag 2 min); 0 = constant 35 °C
 ) {
+    var temp = 35f
     private val r = Random(seed)
     var t = 0f
     var mahTrue = capMah * startPct / 100f
@@ -45,6 +47,7 @@ class FakePhone(
     fun step(dt: Float, burnCmd: Float) {
         t += dt
         burnActual += (burnCmd - burnActual) * dt / 0.5f
+        temp += (35f + heatC * burnActual - temp) * dt / 120f
         if (spikes) {
             if (spikeLeft <= 0f) {
                 usageMw = 0f
@@ -84,7 +87,7 @@ class ControllerSimTest {
                 val mA = zf.filter(Math.round(p.sensorMw / 3.95f * 1000)) / 1000f
                 if (mt.update(tMs, p.gaugeUah, mA, mwOk, p.pct, cfg.capacityMah) && armed) c.retarget(p.pct, mt.mah)
                 if (!armed) { c.arm(p.pct, mt.mah); armed = true }
-                cmd = c.step(Input(tMs, if (mwOk) mA * 3.95f else 0f, mwOk, p.pct, p.plugged, 35f, mt.mah))
+                cmd = c.step(Input(tMs, if (mwOk) mA * 3.95f else 0f, mwOk, p.pct, p.plugged, p.temp, mt.mah))
                 onTick(p.t, c, mt)
                 val use = c.st == St.IN_USE
                 if (use && !wasUse) useTrig++
@@ -109,7 +112,7 @@ class ControllerSimTest {
         name, r.meanNet, r.sdNet, r.meanBurn * 100, r.jitter * 100, r.pctMin, r.pctMax, r.mahErrMax, r.mahErrEnd, r.useTrig)
 
     @Test fun holdWithFieldNoise() {
-        println("=== Charge Brake v0.2 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===")
+        println("=== Charge Brake v0.3 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===")
         for ((name, p) in listOf(
             "field: surplus +700 mW, gain 1.2 W" to FakePhone(1),
             "weak burn gain 0.8 W" to FakePhone(2, burnGain = 800f, steadyMw = 1500f),
@@ -168,6 +171,90 @@ class ControllerSimTest {
         val r = run(p, cfg, 4f, statsAfterS = 3300f) { t, c, _ -> if (p.pct < 60) burnBelow = maxOf(burnBelow, c.burn) else if (reached < 0) reached = t }
         println(line("start 57.5%, target 60%", r) + String.format(" | burn below target %.0f%%, reached after %.0f min", burnBelow * 100, reached / 60))
         assertTrue(burnBelow == 0f && r.pctMin >= 60 && r.pctMax <= 61)
+    }
+
+    @Test fun drainToTargetBelow() {
+        println("=== drain: start 57.5%, target 55% (5 W charger, steady) ===")
+        for ((label, phone) in listOf("field phone (gain 1.2 W)" to 0, "strong brake (gain 3 W)" to 1)) {
+            for (speed in listOf(Drain.GENTLE, Drain.NORMAL, Drain.FAST)) {
+                val cfg = Cfg().apply { holdCurrent = false; targetPct = 55; drainSpeed = speed }
+                val p = if (phone == 0) FakePhone(20 + speed, startPct = 57.5f, surgeS = 0f, heatC = 14f)
+                        else FakePhone(30 + speed, startPct = 57.5f, surgeS = 0f, burnGain = 3000f, heatC = 14f)
+                var reached = -1f; var drainS = 0f; var drainNet = 0.0; var drainN = 0; var sawDrain = false
+                var drainAfter = 0; var tMax = 0f; var hotSeen = false; var wasDrain = false
+                val r = run(p, cfg, 7f, statsAfterS = 6f * 3600f) { t, c, _ ->
+                    val d = c.st == St.DRAINING
+                    if (d) { sawDrain = true; drainN++; drainNet += p.trueNet; drainS += 0.25f }
+                    if (reached < 0 && p.pct <= 55) reached = t
+                    if (reached >= 0 && t > reached + 1800f && d && !wasDrain) drainAfter++
+                    wasDrain = d
+                    tMax = maxOf(tMax, p.temp); if (c.st == St.HOT) hotSeen = true
+                }
+                val mean = if (drainN > 0) drainNet / drainN else 0.0
+                println(String.format("%-26s %-6s net while draining %+5.0f mW | reached 55%% after %5.1f min | then level %d-%d%%, mAh err max %4.1f | temp max %.1f°C%s | re-drains %d",
+                    label, Drain.name(speed), mean, reached / 60, r.pctMin, r.pctMax, r.mahErrMax, tMax, if (hotSeen) " (hot pause)" else "", drainAfter))
+                assertTrue("$label ${Drain.name(speed)} drained", sawDrain && reached > 0)
+                assertTrue("$label ${Drain.name(speed)} holds at target", r.pctMin >= 54 && r.pctMax <= 55)
+                assertTrue("$label ${Drain.name(speed)} temp", tMax < cfg.tempCutoffC + 1f)
+                assertTrue("$label ${Drain.name(speed)} no re-drain", drainAfter <= 1)
+                // where the drain rate is reachable, it is held near the chosen speed
+                if (phone == 1 && speed != Drain.FAST) assertTrue("$label ${Drain.name(speed)} rate", abs(mean - Drain.mw(speed)) < 120)
+                if (phone == 1 && speed == Drain.FAST) assertTrue("$label Fast rate", mean < -1000)
+            }
+        }
+    }
+
+    @Test fun holdCurrentLockedThroughDip() {
+        // locked at 55% (55.4 %); 3 W phone use for 20 min pulls it to 54 %; settings change + mAh source switch mid-dip
+        for (gauge in listOf(true, false)) {
+            val p = FakePhone(40, startPct = 55.4f, surgeS = 0f, gauge = gauge)
+            var lockedPct = -1; var lockedMah = Float.NaN; var minPct = 99; var sawUp = false; var maxHoldDrift = 0
+            var tgtAfterDip = Float.NaN; var banner = ""
+            val r = run(p, Cfg(), 3f, statsAfterS = 2.4f * 3600f) { t, c, mt ->
+                if (lockedPct < 0 && !c.targetMah.isNaN()) { lockedPct = c.holdPct; lockedMah = c.targetMah }
+                p.usageMw = if (t in 1200f..2400f) 3000f else 0f
+                if (t in 1800f..1800.3f) c.retarget(p.pct, mt.mah)          // a settings change must not re-capture
+                if (!gauge && t in 2000f..2000.3f) c.rebase(p.pct, mt.mah)  // mAh source switch keeps the locked %
+                minPct = minOf(minPct, p.pct); if (c.st == St.CHARGING_UP) { sawUp = true; banner = "Charging up to ${c.hold()}%" }
+                if (lockedPct >= 0) maxHoldDrift = maxOf(maxHoldDrift, abs(c.holdPct - lockedPct))
+                if (t > 2.4f * 3600f && tgtAfterDip.isNaN()) tgtAfterDip = c.targetMah
+            }
+            println(String.format("%-36s locked %d%% / %.0f mAh | dip to %d%% (%s) | target after %.0f mAh | then level %d-%d%%, mAh err max %.1f",
+                "hold current, dip (gauge=$gauge)", lockedPct, lockedMah, minPct, banner, tgtAfterDip, r.pctMin, r.pctMax, r.mahErrMax))
+            assertEquals(55, lockedPct)
+            assertTrue("dipped below", minPct <= 54 && sawUp && banner == "Charging up to 55%")
+            assertEquals("hold % never re-captured", 0, maxHoldDrift)
+            if (gauge) assertEquals("locked mAh kept", lockedMah, tgtAfterDip, 0.01f) else assertTrue(tgtAfterDip >= lockedMah - 0.6f * 48.6f)
+            assertTrue("back at the locked level", r.pctMin == 55 && r.pctMax == 55)
+        }
+    }
+
+    @Test fun holdLockSurvivesRestart() {
+        val cfg = Cfg(); val c = Controller(cfg)
+        c.arm(55, 2680f)                       // user enables: lock 55 % / 2680 mAh
+        c.arm(54, 2640f, keepHold = true)      // service restart while the level is lower
+        c.retarget(54, 2640f)
+        println(String.format("%-36s after restart at 54%%: hold %d%%, target %.0f mAh", "hold lock + restart", c.hold(), c.targetMah))
+        assertEquals(55, c.hold()); assertEquals(2680f, c.targetMah, 0.01f)
+        c.lockHold(54, 2640f); c.retarget(54, 2640f)   // user taps Hold current again: re-lock
+        assertEquals(54, c.hold()); assertEquals(2640f, c.targetMah, 0.01f)
+    }
+
+    @Test fun holdQuality() {
+        for ((name, p, expect) in listOf(
+            Triple("field charger", FakePhone(50, surgeS = 0f), "ok"),
+            Triple("charger too strong (4 W)", FakePhone(51, surgeS = 0f, steadyMw = 4000f), "charger too strong, brake maxed"),
+            Triple("charger too weak (0.5 W, phone 2.5 W)", FakePhone(52, surgeS = 0f, steadyMw = 500f, baseMw = 2500f), "charger too weak, draining"),
+        )) {
+            val dm = DriftMeter(); var last = 0f
+            run(p, Cfg(), 1f, statsAfterS = 0f) { t, c, _ ->
+                if (t >= 1800f && t - last >= 1f) { last = t; dm.add(p.sensorMw, 3.95f, 4860f, c.burn, Cfg().maxBurn) }
+            }
+            val q = dm.minPerPct
+            println(String.format("%-36s drift %+5.0f mW (±%.0f) -> %s per 1%% %s", "hold quality: $name", dm.mw, dm.noise,
+                if (q.isInfinite()) "∞ (steady)" else String.format("%.0f min", q), dm.reason))
+            if (expect == "ok") assertTrue(name, q.isInfinite() || q >= 60f) else { assertTrue(name, q < 10f); assertEquals(expect, dm.reason) }
+        }
     }
 
     @Test fun noGaugeCoulombCounting() {

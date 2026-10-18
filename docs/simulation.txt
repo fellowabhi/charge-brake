@@ -1,14 +1,27 @@
-=== Charge Brake v0.2 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===
-field: surplus +700 mW, gain 1.2 W   net    +0 mW (sd   66) | burn 58.3% jitter  3.9% | level 60-60% | mAh err max   1.4 end  +0.5 | in-use trig 1
-weak burn gain 0.8 W                 net   -11 mW (sd   66) | burn 63.9% jitter  4.5% | level 60-60% | mAh err max   7.4 end  +0.6 | in-use trig 2
-strong burn gain 3 W                 net    +1 mW (sd  125) | burn 23.3% jitter  3.4% | level 60-60% | mAh err max   1.5 end  +1.0 | in-use trig 12
-surplus +300 mW                      net    -2 mW (sd   63) | burn 25.1% jitter  3.7% | level 60-60% | mAh err max   1.2 end  +0.0 | in-use trig 3
-lag: 2 s sensor period               net    -3 mW (sd  154) | burn 58.6% jitter  9.2% | level 60-60% | mAh err max   2.6 end  +0.3 | in-use trig 20
+=== Charge Brake v0.3 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===
+field: surplus +700 mW, gain 1.2 W   net    +0 mW (sd   67) | burn 58.3% jitter  3.9% | level 60-60% | mAh err max   1.6 end  +0.4 | in-use trig 3
+weak burn gain 0.8 W                 net   -18 mW (sd   68) | burn 64.8% jitter  4.2% | level 60-60% | mAh err max  10.5 end  +0.3 | in-use trig 1
+strong burn gain 3 W                 net    +0 mW (sd  122) | burn 23.3% jitter  3.3% | level 60-60% | mAh err max   1.3 end  +1.0 | in-use trig 11
+surplus +300 mW                      net    -1 mW (sd   64) | burn 25.1% jitter  3.7% | level 60-60% | mAh err max   1.4 end  -0.0 | in-use trig 2
+lag: 2 s sensor period               net    -3 mW (sd  154) | burn 58.6% jitter  9.2% | level 60-60% | mAh err max   2.4 end  +0.3 | in-use trig 24
 start 57.5%, target 60%              net   +11 mW (sd   77) | burn 57.4% jitter  3.7% | level 60-60% | mAh err max   8.8 end  +0.0 | in-use trig 2 | burn below target 0%, reached after 41 min
+=== drain: start 57.5%, target 55% (5 W charger, steady) ===
+field phone (gain 1.2 W)   Gentle net while draining  -111 mW | reached 55% after 163.6 min | then level 55-55%, mAh err max  0.9 | temp max 45.0°C (hot pause) | re-drains 0
+field phone (gain 1.2 W)   Normal net while draining  -176 mW | reached 55% after 159.6 min | then level 55-55%, mAh err max  1.0 | temp max 45.0°C (hot pause) | re-drains 0
+field phone (gain 1.2 W)   Fast   net while draining  -177 mW | reached 55% after 158.3 min | then level 55-55%, mAh err max  1.3 | temp max 45.0°C (hot pause) | re-drains 0
+strong brake (gain 3 W)    Gentle net while draining  -128 mW | reached 55% after 135.0 min | then level 55-55%, mAh err max  1.4 | temp max 39.2°C | re-drains 0
+strong brake (gain 3 W)    Normal net while draining  -350 mW | reached 55% after  49.3 min | then level 55-55%, mAh err max  1.4 | temp max 40.3°C | re-drains 0
+strong brake (gain 3 W)    Fast   net while draining -1524 mW | reached 55% after  12.8 min | then level 55-55%, mAh err max  0.9 | temp max 45.0°C (hot pause) | re-drains 0
 zero filter: [500, 0, 520, 0, 0, 0, 480] -> [500, 500, 520, 520, 0, 0, 480]
-no fuel gauge -> coulomb counting    net    -3 mW (sd   72) | burn 58.6% jitter  3.9% | level 60-60% | mAh err max   1.9 end  -1.2 | in-use trig 5
+hold lock + restart                  after restart at 54%: hold 55%, target 2680 mAh
+hold current, dip (gauge=true)       locked 55% / 2697 mAh | dip to 51% (Charging up to 55%) | target after 2697 mAh | then level 55-55%, mAh err max 0.9
+hold current, dip (gauge=false)      locked 55% / 2697 mAh | dip to 51% (Charging up to 55%) | target after 2693 mAh | then level 55-55%, mAh err max 2.7
+no fuel gauge -> coulomb counting    net    -3 mW (sd   72) | burn 58.5% jitter  3.9% | level 60-60% | mAh err max   2.4 end  -1.7 | in-use trig 6
 no mW reading -> % fallback (6 h)    net    -0 mW (sd  154) | burn 58.3% jitter  7.0% | level 60-61% | mAh err max  24.8 end +24.0 | in-use trig 0
+hold quality: field charger          drift    +2 mW (±57) -> ∞ (steady) per 1% 
+hold quality: charger too strong (4 W) drift +2087 mW (±56) -> 6 min per 1% charger too strong, brake maxed
+hold quality: charger too weak (0.5 W, phone 2.5 W) drift -2002 mW (±60) -> 6 min per 1% charger too weak, draining
 15 W fast charger                    off at 9, 139, 268, 398, 527 s, burn while off 0%
 5 W surge (field charger)            tripped: false
 15 W + Ignore                        burn after Ignore 80%
-random use 0.5-2 W, 5-55 s           net    -1 mW (sd  307) | burn 47.3% jitter  9.1% | level 60-60% | mAh err max   3.8 end  +0.7 | in-use trig 54 | back-off to 30% in median 4.5 s (n=40)
+random use 0.5-2 W, 5-55 s           net    +1 mW (sd  307) | burn 47.2% jitter  9.1% | level 60-60% | mAh err max   3.9 end  +1.0 | in-use trig 53 | back-off to 30% in median 4.5 s (n=38)
