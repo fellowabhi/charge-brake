@@ -41,7 +41,8 @@ data class BubbleData(
     val healthy get() = holding && !paused && abs(net) <= BAND
     companion object {
         const val BAND = 100f
-        fun from(m: Monitor) = BubbleData(m.avgMw, m.ctl.burn, m.state, m.pct, m.ctl.hold(), Look.goalMah(m), m.mah, m.temp, m.minPerPct, m.ctl.paused)
+        fun from(m: Monitor): BubbleData { val g = Look.goalMah(m)
+            return BubbleData(m.avgMw, m.ctl.burn, m.state, m.pct, m.ctl.approxPct(g, m.pct, m.mah), g, m.mah, m.temp, m.minPerPct, m.ctl.paused) }
     }
 }
 
@@ -75,8 +76,8 @@ class BubbleView(ctx: Context) : View(ctx) {
     private val pFill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val pRing = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
     private val pLine = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
-    private val pTxt = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD) }
-    private val pTxtN = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val pTxt = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD); fontFeatureSettings = "tnum" }
+    private val pTxtN = Paint(Paint.ANTI_ALIAS_FLAG).apply { fontFeatureSettings = "tnum" }
     private val rect = RectF(); private val mtx = Matrix()
     private val path = android.graphics.Path()
 
@@ -261,12 +262,13 @@ class BubbleView(ctx: Context) : View(ctx) {
         pTxt.color = if (healthy) C_GREEN else stCol; pTxt.alpha = al
         fit(c, stTxt, right, cy - R * 0.36f, 10f, tw * 0.45f, pTxt, Paint.Align.RIGHT)
         // line 2: the target, in % and mAh; while charging up / draining as "54% → 56%"
-        val mahTxt = if (v.holdMah.isNaN()) "" else " · " + fmtInt(v.holdMah) + " mAh"
+        val tgt = if (v.holdMah.isNaN()) "${v.hold}%" else "${fmtInt(v.holdMah)} mAh (≈${v.hold}%)"
+        val go = !v.holdMah.isNaN() && !v.mah.isNaN()
         val l2 = when (v.st) {
-            St.CHARGING_UP -> "${v.pct}% → ${v.hold}%" + (if (!v.holdMah.isNaN() && !v.mah.isNaN()) " · ${fmtInt(maxOf(0f, v.holdMah - v.mah))} mAh to go" else "")
-            St.DRAINING -> "${v.pct}% → ${v.hold}%" + (if (!v.holdMah.isNaN() && !v.mah.isNaN()) " · ~${fmtInt(maxOf(0f, v.mah - v.holdMah))} mAh to go" else "")
+            St.CHARGING_UP -> "→ $tgt" + (if (go) " · ${fmtInt(maxOf(0f, v.holdMah - v.mah))} to go" else "")
+            St.DRAINING -> "→ $tgt" + (if (go) " · ~${fmtInt(maxOf(0f, v.mah - v.holdMah))} to go" else "")
             St.OFF -> "Brake off · ${v.pct}%"
-            else -> "Hold ${v.hold}%$mahTxt"
+            else -> "Hold $tgt"
         }
         pTxtN.color = 0xD9FFFFFF.toInt(); pTxtN.alpha = (0.85f * al).toInt()
         fit(c, l2, tx, cy + 1.5f, 10f, tw, pTxtN)

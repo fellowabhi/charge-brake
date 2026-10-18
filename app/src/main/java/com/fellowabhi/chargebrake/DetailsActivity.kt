@@ -23,6 +23,10 @@ class DetailsActivity : Activity() {
     private lateinit var modeRow: LinearLayout
     private lateinit var drainRow: FlowRow
     private lateinit var batBtn: TextView
+    private lateinit var powRow: FlowRow
+    private lateinit var unitRow: FlowRow
+    private lateinit var mahRow: LinearLayout
+    private lateinit var tgtTv: TextView
     private val tick: () -> Unit = { refresh() }
 
     override fun onCreate(b: Bundle?) {
@@ -36,7 +40,22 @@ class DetailsActivity : Activity() {
         modeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }; col.add(modeRow, dp(8)); updMode()
         col.add(text(11.5f, C_FAINT, txt = "Auto = mW controller with mAh hold, falls back to % if the power reading looks bad."), dp(6))
         section("HOLD")
-        slider(col, "Target level", 20, 100, 1, cfg.targetPct, { "$it%" }) { cfg.targetPct = it; Monitor.changed("target_pct", it, true) }
+        slider(col, "Target level", 20, 100, 1, cfg.targetPct, { "$it%" }) { Monitor.setTargetPct(it); updTgt() }
+        col.add(text(14f, C_DIM, txt = "Enter the target as"), dp(12))
+        unitRow = FlowRow(this, dp(6), dp(6)); col.add(unitRow, dp(8))
+        val mahIn = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER; hint = "target mAh"; setTextColor(C_TXT); setHintTextColor(C_FAINT); textSize = 15f
+            if (!cfg.targetMahSet.isNaN()) setText(cfg.targetMahSet.toInt().toString())
+        }
+        mahRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
+        mahRow.addView(mahIn, LinearLayout.LayoutParams(0, -2, 1f))
+        mahRow.addView(button("Set mAh") {
+            val v = mahIn.text.toString().toFloatOrNull()
+            if (v == null || v < 100f || v > cfg.capacityMah * 1.3f) Toast.makeText(this, "Enter an mAh value up to ~${cfg.capacityMah.toInt()}", Toast.LENGTH_SHORT).show()
+            else { Monitor.setTargetUnit(true); Monitor.setTargetMah(v); updTgt() }
+        }, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) })
+        col.add(mahRow, dp(6))
+        tgtTv = text(11.5f, C_FAINT); col.add(tgtTv, dp(4)); updTgt()
         slider(col, "Battery capacity", 2000, 7000, 10, cfg.capacityMah.toInt(), { "$it mAh" }) { cfg.capacityMah = it.toFloat(); Monitor.changed("capacity", it, true) }
         col.add(text(11.5f, C_FAINT, txt = String.format(Locale.US, "Rated %.0f mAh (%s). Used for %% → mAh and counting.", Monitor.ratedMah, Monitor.ratedSrc)), dp(2))
         col.add(text(14f, C_DIM, txt = "Drain speed (when the target is below the current level)"), dp(14))
@@ -45,8 +64,11 @@ class DetailsActivity : Activity() {
         slider(col, "Fallback net target (no mAh)", -200, 500, 25, cfg.targetMw, { "%+d mW".format(it) }) { cfg.targetMw = it; Monitor.changed("target_mW", it) }
         section("BRAKE")
         slider(col, "Aggressiveness", 1, 5, 1, cfg.aggr, { "$it" }) { cfg.aggr = it; Monitor.changed("aggr", it) }
-        slider(col, "Max brake", 10, 100, 5, (cfg.maxBurn * 100).toInt(), { "$it%" }) { cfg.maxBurn = it / 100f; Monitor.changed("max_burn", it / 100f) }
-        slider(col, "Brake threads", 1, 8, 1, Monitor.threads, { "$it" }) { Monitor.changeThreads(it) }
+        col.add(text(14f, C_DIM, txt = "Max brake power"), dp(12))
+        powRow = FlowRow(this, dp(6), dp(6)); col.add(powRow, dp(8)); updPow()
+        col.add(text(11.5f, C_FAINT, txt = "Normal = the Max brake % below on the chosen threads (default 80 %, 4 threads). High = all ${Monitor.cores} cores at 100 %. Max = all cores at 100 % with normal-priority threads (can slow the phone). Higher levels get the phone warm; the temperature cutoff (${cfg.tempCutoffC.toInt()} °C) always applies. In Live view the app's own drawing (higher frame rate, glows) is used first, CPU threads only for the rest."), dp(6))
+        slider(col, "Max brake (Normal)", 10, 100, 5, (Monitor.userMaxBurn * 100).toInt(), { "$it%" }) { Monitor.changeMaxBurn(it / 100f) }
+        slider(col, "Brake threads (Normal)", 1, 8, 1, Monitor.threads, { "$it" }) { Monitor.changeThreads(it) }
         section("SAFETY")
         slider(col, "Fast-charger cutoff (10 s avg)", 1000, 20000, 500, cfg.fastCutoffMw, { String.format(Locale.US, "%.1f W", it / 1000f) }) { cfg.fastCutoffMw = it; Monitor.changed("fast_cutoff_mW", it) }
         slider(col, "Temperature cutoff", 350, 550, 5, (cfg.tempCutoffC * 10).toInt(), { String.format(Locale.US, "%.1f °C", it / 10f) }) { cfg.tempCutoffC = it / 10f; Monitor.changed("temp_cutoff", it / 10f) }
@@ -68,6 +90,22 @@ class DetailsActivity : Activity() {
 
     private fun button(label: String, bg: Int = C_CARD, onClick: () -> Unit) = text(15f, C_TXT, txt = label).apply {
         setPadding(dp(16), dp(14), dp(16), dp(14)); background = round(bg, dpf(12f)); setOnClickListener { onClick() }
+    }
+
+    private fun updPow() {
+        powRow.removeAllViews()
+        listOf(Monitor.P_NORMAL, Monitor.P_HIGH, Monitor.P_MAX).forEach { p ->
+            powRow.addView(chip(Monitor.powerName(p), Monitor.power == p) { Monitor.setPower(p); updPow() })
+        }
+    }
+    private fun updTgt() {
+        unitRow.removeAllViews()
+        unitRow.addView(chip("%", !Monitor.targetByMah) { Monitor.setTargetUnit(false); updTgt() })
+        unitRow.addView(chip("mAh", Monitor.targetByMah) { Monitor.setTargetUnit(true); updTgt() })
+        mahRow.visibility = if (Monitor.targetByMah) android.view.View.VISIBLE else android.view.View.GONE
+        val c = Monitor.cfg
+        tgtTv.text = if (c.targetMahSet.isNaN()) "The % is converted once to an exact mAh target when there is a charge reading."
+            else "Target ${Monitor.mahLabel(c.targetMahSet)} · converted once, held exactly (no % rounding)." + if (c.holdCurrent) " (Hold current is selected now.)" else ""
     }
 
     private fun updDrain() {
@@ -132,7 +170,9 @@ class DetailsActivity : Activity() {
             hold              %s %d %% · drain %s (draining %b)
             target power      %+.0f mW
             ema slow / use    %+.0f / %+.0f mW
-            brake             %.1f %% x %d threads (~%.0f mW)
+            brake             %.1f %% x %d threads (~%.0f mW) · power %s
+            brake split       visual %.0f mW (level %.2f, render %s) · CPU %.0f mW
+            target mAh set    %.1f (≈%d %%) · hold mAh %.1f
             fast 10 s avg     %.0f mW (cutoff %d) retry %d s ignore %b
             sensor period     %.2f s (controller est.)
             log rows          %d
@@ -141,7 +181,8 @@ class DetailsActivity : Activity() {
             m.mwOk, m.rateHz, SystemClock.elapsedRealtime() - m.lastChange, m.chargeCounter, m.mahT.gaugeMah, m.mah, m.mahT.source,
             c.targetMah, m.pct, m.temp, plugName(m.plugged), m.status, m.health, m.maxChgUa, m.maxChgUv,
             m.state.name, if (c.paused) "(paused)" else "", Mode.name(f.mode), Mode.name(c.effMode), if (f.holdCurrent) "current" else "target", c.hold(), Drain.name(f.drainSpeed), c.draining,
-            c.tgtMw, c.emaSlow, c.emaUse, c.burn * 100, m.burner.threads, m.burnMw, c.fastMw, f.fastCutoffMw, c.fastRetryInS, c.ignoreFast,
+            c.tgtMw, c.emaSlow, c.emaUse, c.burn * 100, m.burner.threads, m.burnMw, m.powerName(), m.visMw, m.visLevel, if (m.renderOk) "on" else "off", m.cpuMw,
+            f.targetMahSet, c.approxPct(f.targetMahSet, m.pct, m.mah), c.holdMah, c.fastMw, f.fastCutoffMw, c.fastRetryInS, c.ignoreFast,
             c.sensorPeriodS, m.logRows())
     }
 

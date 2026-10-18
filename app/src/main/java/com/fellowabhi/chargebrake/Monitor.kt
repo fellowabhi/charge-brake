@@ -19,8 +19,8 @@ import kotlin.math.abs
 
 /** Samples the battery every 250 ms, runs the controller when enabled, keeps history + CSV log. */
 object Monitor {
-    const val VERSION = "0.4"
-    const val VERSION_CODE = 4
+    const val VERSION = "0.5.1"
+    const val VERSION_CODE = 5
     const val TICK_MS = 250L
     val cfg = Cfg()
     val ctl = Controller(cfg)
@@ -44,6 +44,42 @@ object Monitor {
     @Volatile var uiMode = UI_NONE
     const val UI_NONE = 0; const val UI_ECO = 1; const val UI_LIVE = 2
     val cost = UiCost()
+    // brake stages: render (Live view on screen) first, then CPU
+    val split = BrakeSplit()
+    @Volatile var visLevel = 0f; private set          // 0..1 render-brake intensity the activity applies
+    @Volatile var renderOk = false; private set
+    val visMw get() = split.vis * cfg.burnMwFull       // estimated brake power from rendering
+    val cpuMw get() = split.cpu * cfg.burnMwFull
+    // Max brake power: Normal (Max brake % + thread setting), High (all cores 100 %), Max (all cores 100 %, normal priority)
+    const val P_NORMAL = 0; const val P_HIGH = 1; const val P_MAX = 2
+    var power = P_NORMAL; private set
+    var userMaxBurn = 0.8f; private set
+    val cores = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
+    val effThreads get() = if (power == P_NORMAL) threads else cores
+    fun powerName(p: Int = power) = when (p) { P_HIGH -> "High"; P_MAX -> "Max"; else -> "Normal" }
+    fun setPower(p: Int) { power = p; applyPower(); changed("max_power", powerName()) ; h?.post { if (enabled) burner.start(effThreads, power == P_MAX) } }
+    private fun applyPower() {
+        cfg.maxBurn = if (power == P_NORMAL) userMaxBurn else 1f
+        cfg.burnMwFull = 1500f * effThreads / 4f
+    }
+    fun changeMaxBurn(v: Float) { userMaxBurn = v; applyPower(); changed("max_burn", v) }
+    // target in mAh
+    var targetByMah = false; private set           // user enters the target in mAh (stepper ±10 mAh) instead of %
+    private var tgtSrc = ""
+    fun setTargetUnit(mahUnit: Boolean) { targetByMah = mahUnit; prefs.edit().putBoolean("tUnit", mahUnit).apply() }
+    /** User picked a target %: converted once to mAh. */
+    fun setTargetPct(p: Int) {
+        cfg.holdCurrent = false
+        h?.post { ctl.setTargetPct(p.coerceIn(5, 100), pct, mahT.mah); tgtSrc = mahT.source; ctl.retarget(pct, mahT.mah); save()
+            event(String.format(Locale.US, "target %d%% -> %.1f mAh", cfg.targetPct, cfg.targetMahSet)) } ?: run { cfg.targetPct = p.coerceIn(5, 100); cfg.targetMahSet = Float.NaN; save() }
+    }
+    fun setTargetMah(v: Float) {
+        cfg.holdCurrent = false
+        h?.post { ctl.setTargetMah(v, pct, mahT.mah); tgtSrc = mahT.source; ctl.retarget(pct, mahT.mah); save()
+            event(String.format(Locale.US, "target %.1f mAh (≈%d%%)", v, cfg.targetPct)) }
+    }
+    /** "2,916 mAh (≈60%)" for a target mAh. */
+    fun mahLabel(v: Float) = if (v.isNaN()) "${ctl.hold()}%" else "${fmtInt(v)} mAh (≈${ctl.approxPct(v, pct, mahT.mah)}%)"
     private var pm: android.os.PowerManager? = null
     const val AVG_S = 1.5f                   // display smoothing of the big number / white line
     private val log = ArrayDeque<String>()   // 1 Hz rows + events, last ~4 h
@@ -105,7 +141,7 @@ object Monitor {
             cfg.mode = getInt("mode", Mode.AUTO); cfg.holdCurrent = getBoolean("holdCur", true)
             cfg.targetPct = getInt("tPct", 60); cfg.targetMw = getInt("tMw", 100)
             cfg.fastCutoffMw = getInt("fast2", 6000); cfg.tempCutoffC = getFloat("temp2", 45f)
-            cfg.aggr = getInt("aggr", 3); cfg.maxBurn = getFloat("maxBurn", 0.8f); cfg.drainSpeed = getInt("drain", Drain.NORMAL)
+            cfg.aggr = getInt("aggr", 3); userMaxBurn = getFloat("maxBurn", 0.8f); cfg.drainSpeed = getInt("drain", Drain.NORMAL)
             cfg.capacityMah = getFloat("cap", ratedMah)
             threads = getInt("threads", 4); invert = getBoolean("invert", false)
             unitUa = getBoolean("ua", false); unitKnown = getBoolean("uaKnown", false)
@@ -113,8 +149,10 @@ object Monitor {
             ctl.holdPct = getInt("hold", -1); ctl.holdMah = getFloat("holdMah", Float.NaN); holdSrc = getString("holdSrc", "") ?: ""; useBase = getFloat("useBase", Float.NaN)
             spanMs = getLong("span", 120_000L).takeIf { it in SPANS } ?: 120_000L
             live = getBoolean("live", false); bubble = getBoolean("bubble", false)
+            power = getInt("power", P_NORMAL).coerceIn(0, 2); targetByMah = getBoolean("tUnit", false)
+            cfg.targetMahSet = getFloat("tMah", Float.NaN); tgtSrc = getString("tSrc", "") ?: ""
         }
-        cfg.burnMwFull = 1500f * threads / 4f
+        applyPower()
         t0 = SystemClock.elapsedRealtime()
     }
 
@@ -128,7 +166,7 @@ object Monitor {
     fun save() {
         prefs.edit().putInt("mode", cfg.mode).putBoolean("holdCur", cfg.holdCurrent)
             .putInt("tPct", cfg.targetPct).putInt("tMw", cfg.targetMw).putInt("fast2", cfg.fastCutoffMw)
-            .putFloat("temp2", cfg.tempCutoffC).putInt("aggr", cfg.aggr).putFloat("maxBurn", cfg.maxBurn).putInt("drain", cfg.drainSpeed)
+            .putFloat("temp2", cfg.tempCutoffC).putInt("aggr", cfg.aggr).putFloat("maxBurn", userMaxBurn).putInt("power", power).putFloat("tMah", cfg.targetMahSet).putString("tSrc", tgtSrc).putInt("drain", cfg.drainSpeed)
             .putFloat("cap", cfg.capacityMah)
             .putInt("threads", threads).putBoolean("invert", invert)
             .putBoolean("ua", unitUa).putBoolean("uaKnown", unitKnown)
@@ -169,11 +207,12 @@ object Monitor {
             if (on && !enabled) {
                 ctl.paused = false
                 if (resume && holdSrc != mahT.source) ctl.holdMah = Float.NaN   // saved mAh is on another scale
-                ctl.arm(pct, mahT.mah, keepHold = resume); holdSrc = mahT.source; savedHoldMah = ctl.holdMah
-                burner.start(threads); enabled = true
+                if (tgtSrc != mahT.source) cfg.targetMahSet = Float.NaN          // re-converted from the target %
+                ctl.arm(pct, mahT.mah, keepHold = resume); holdSrc = mahT.source; tgtSrc = mahT.source; savedHoldMah = ctl.holdMah
+                burner.start(effThreads, power == P_MAX); enabled = true
                 event(if (resume) "brake on (resumed, hold ${ctl.holdPct}%)" else "brake on (hold locked ${ctl.hold()}%)")
             } else if (!on && enabled) {
-                enabled = false; ctl.disarm(); burner.stop(); event("brake off")
+                enabled = false; ctl.disarm(); burner.stop(); cfg.visCap = 0f; split.split(0f, 0f, cfg.burnMwFull); visLevel = 0f; event("brake off")
             }
             save()
         }
@@ -192,8 +231,8 @@ object Monitor {
     fun ignoreFast() { h?.post { ctl.ignoreFast = true; event("ignore fast charger") } }
 
     fun changeThreads(n: Int) {
-        threads = n; cfg.burnMwFull = 1500f * n / 4f; changed("threads", n)
-        h?.post { if (enabled) burner.start(n) }
+        threads = n; applyPower(); changed("threads", n)
+        h?.post { if (enabled) burner.start(effThreads, power == P_MAX) }
     }
 
     private fun readIntent(i: Intent) {
@@ -250,16 +289,25 @@ object Monitor {
         avgMw += (mW - avgMw) * dt / (AVG_S + dt)
         estimateUse(dt)
 
-        if (mahT.update(now, chargeCounter, mA, mwOk, pct, cfg.capacityMah) && enabled) {
-            ctl.rebase(pct, mahT.mah); event("mAh source -> ${mahT.source}")
-        }
+        val switched = mahT.update(now, chargeCounter, mA, mwOk, pct, cfg.capacityMah)
         val shift = smooth.update(dt, mahT.mah, mahT.source, mA, mwOk)
         if (shift != 0f) lhist.shift(shift)   // source switch: move the old curve so the graph has no jump
+        if (switched) {
+            // move the exact mAh targets onto the new scale by the same offset (no re-rounding to %)
+            if (shift != 0f) ctl.shiftScale(shift) else if (enabled) ctl.rebase(pct, mahT.mah)
+            holdSrc = mahT.source; tgtSrc = mahT.source; if (enabled) save()
+            event(String.format(Locale.US, "mAh source -> %s (targets moved %+.1f mAh)", mahT.source, shift))
+        }
 
         var b = 0f
         if (enabled) {
+            // render stage only in Live view, activity on screen, screen on
+            renderOk = live && uiMode == UI_LIVE && pm?.isInteractive == true
+            val cap = split.update(dt, renderOk, cfg.burnMwFull)
+            cfg.visCap = cap
             b = ctl.step(Input(now, mW, mwOk, pct, plugged != 0, temp, mahT.mah))
-            burner.level = b
+            split.split(b, cap, cfg.burnMwFull)
+            burner.level = split.cpu; visLevel = split.visLevel
             if (ctl.holdMah.toBits() != savedHoldMah.toBits()) { savedHoldMah = ctl.holdMah; holdSrc = mahT.source; save() }
         }
         hist.add(now, mW, avgMw, b, if (enabled) ctl.tgtMw else 0f, pct, mahT.mah, if (enabled) ctl.targetMah else Float.NaN)
@@ -297,21 +345,21 @@ object Monitor {
     val minPerPct get() = drift.minPerPct
     val driftReason get() = drift.reason
     val holdingNow get() = enabled && !ctl.paused && when (ctl.st) { St.HOLDING, St.BRAKING, St.IN_USE, St.IDLE -> true; else -> false }
-    private fun updateDrift() { if (!holdingNow) drift.reset() else if (mwOk) drift.add(mW, volt, cfg.capacityMah, ctl.burn, cfg.maxBurn) }
+    private fun updateDrift() { if (!holdingNow) drift.reset() else if (mwOk) drift.add(mW, volt, cfg.capacityMah, ctl.burn, ctl.maxOut) }
 
     private val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-    private const val COLS = "time,elapsed_s,event,raw_current_now,raw_current_avg,mA,V,mW,avg_mW,phone_use_est_mW,ema_mW,ema_use_mW,target_mW,burn,pct,mAh,target_mAh,mAh_source,charge_counter,temp_C,plugged,status,state,enabled,paused,hold_pct,mode,eff_mode,hold_mode,target_pct,temp_cutoff,fast_cutoff_mW,fast_avg_mW,aggr,max_burn,threads,capacity,sensor_hz,mw_ok,unit_ua,flip,invert,drain_speed,hold_drift_mW,hold_min_per_pct,ui_mode,graph_mAh"
+    private const val COLS = "time,elapsed_s,event,raw_current_now,raw_current_avg,mA,V,mW,avg_mW,phone_use_est_mW,ema_mW,ema_use_mW,target_mW,burn,pct,mAh,target_mAh,mAh_source,charge_counter,temp_C,plugged,status,state,enabled,paused,hold_pct,mode,eff_mode,hold_mode,target_pct,temp_cutoff,fast_cutoff_mW,fast_avg_mW,aggr,max_burn,threads,capacity,sensor_hz,mw_ok,unit_ua,flip,invert,drain_speed,hold_drift_mW,hold_min_per_pct,ui_mode,graph_mAh,brake_visual,brake_cpu,max_power"
 
     fun event(e: String) { h?.post { addLog(SystemClock.elapsedRealtime(), ctl.burn, e) } ?: addLog(SystemClock.elapsedRealtime(), ctl.burn, e) }
 
     private fun addLog(now: Long, b: Float, ev: String) {
         val row = String.format(Locale.US,
-            "%s,%.1f,%s,%d,%d,%.1f,%.3f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%d,%.1f,%.1f,%s,%d,%.1f,%d,%d,%s,%b,%b,%d,%s,%s,%s,%d,%.1f,%d,%.0f,%d,%.2f,%d,%.0f,%.2f,%b,%b,%b,%b,%s,%.0f,%.0f,%s,%.2f",
+            "%s,%.1f,%s,%d,%d,%.1f,%.3f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%d,%.1f,%.1f,%s,%d,%.1f,%d,%d,%s,%b,%b,%d,%s,%s,%s,%d,%.1f,%d,%.0f,%d,%.2f,%d,%.0f,%.2f,%b,%b,%b,%b,%s,%.0f,%.0f,%s,%.2f,%.3f,%.3f,%s",
             df.format(Date()), (now - t0) / 1000f, ev.replace(',', ';'), raw, rawAvg, mA, volt, mW, avgMw, phoneUse, ctl.emaSlow, ctl.emaUse, ctl.tgtMw, b, pct,
             mahT.mah, ctl.targetMah, mahT.source, chargeCounter, temp, plugged, status, state.name, enabled, ctl.paused, ctl.hold(),
             Mode.name(cfg.mode), Mode.name(ctl.effMode), if (cfg.holdCurrent) "current" else "target", cfg.targetPct, cfg.tempCutoffC,
             cfg.fastCutoffMw, ctl.fastMw, cfg.aggr, cfg.maxBurn, burner.threads, cfg.capacityMah, rateHz, mwOk,
-            unitUa || maxAbs > 15_000, flip, invert, Drain.name(cfg.drainSpeed), driftMw, minPerPct, when (uiMode) { UI_ECO -> "eco"; UI_LIVE -> "live"; else -> "bg" }, smooth.value)
+            unitUa || maxAbs > 15_000, flip, invert, Drain.name(cfg.drainSpeed), driftMw, minPerPct, when (uiMode) { UI_ECO -> "eco"; UI_LIVE -> "live"; else -> "bg" }, smooth.value, split.vis, split.cpu, powerName())
         synchronized(log) { log.addLast(row); if (log.size > LOG_CAP) log.removeFirst() }
     }
 

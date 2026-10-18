@@ -53,35 +53,33 @@ object Look {
         St.HOT, St.PAUSED, St.FAST, St.NO_READING -> R.drawable.ic_st_paused
         St.OFF, St.UNPLUGGED -> R.drawable.ic_st_off
     }
-    /** mAh the hold aims at: the controller's target, or (charging up to a target %) an estimate from the capacity. */
+    /** mAh the hold aims at: the controller's exact target; when off in target mode, the converted target. */
     fun goalMah(m: Monitor): Float {
         val t = m.ctl.targetMah
-        if (!t.isNaN()) return t
-        if (m.mah.isNaN()) return Float.NaN
-        val goal = if (m.enabled) m.ctl.hold() else if (!m.cfg.holdCurrent) m.cfg.targetPct else return Float.NaN
-        return if (goal > m.pct) m.mah + (goal - m.pct) * m.cfg.capacityMah / 100f else Float.NaN
+        if (m.enabled && !t.isNaN()) return t
+        if (m.enabled) return m.ctl.goal()
+        if (m.cfg.holdCurrent) return Float.NaN
+        if (!m.cfg.targetMahSet.isNaN()) return m.cfg.targetMahSet
+        return if (m.mah.isNaN()) Float.NaN else m.mah + (m.cfg.targetPct - m.pct) * m.cfg.capacityMah / 100f
     }
-    private fun over(m: Monitor): String {
-        val t = m.ctl.targetMah
-        return if (t.isNaN() || m.mah.isNaN()) "" else " (~${fmtInt(maxOf(0f, m.mah - t))} mAh to go)"
-    }
-    private fun toGo(m: Monitor): String {
+    private fun goalTxt(m: Monitor) = m.mahLabel(goalMah(m))
+    private fun toGo(m: Monitor, down: Boolean): String {
         val t = goalMah(m)
-        return if (t.isNaN() || m.mah.isNaN()) "" else " (${fmtInt(maxOf(0f, t - m.mah))} mAh to go)"
+        return if (t.isNaN() || m.mah.isNaN()) "" else (if (down) "~" else "") + fmtInt(maxOf(0f, if (down) m.mah - t else t - m.mah)) + " mAh to go · "
     }
     /** What the brake would hold if started now. */
-    fun planned(m: Monitor) = if (m.cfg.holdCurrent) "the current ${m.pct}%" else "${m.cfg.targetPct}%"
+    fun planned(m: Monitor) = if (m.cfg.holdCurrent) "the current " + (if (m.mah.isNaN()) "${m.pct}%" else "${fmtInt(m.mah)} mAh") else goalTxt(m)
 
     fun title(s: St, m: Monitor): String {
         val c = m.ctl
         return when (s) {
             St.OFF -> if (m.plugged == 0) "Off · not plugged in" else "Off"
             St.UNPLUGGED -> "Unplugged · waiting"
-            St.CHARGING_UP -> "Charging up to ${c.hold()}%" + toGo(m)
-            St.DRAINING -> "Draining to ${c.hold()}%" + over(m)
-            St.BRAKING -> "Holding ${c.hold()}% · braking"
-            St.HOLDING, St.IDLE -> "Holding ${c.hold()}%"
-            St.IN_USE -> "Holding ${c.hold()}% · phone in use"
+            St.CHARGING_UP -> "Charging up to ${goalTxt(m)}"
+            St.DRAINING -> "Draining to ${goalTxt(m)}"
+            St.BRAKING -> "Hold ${goalTxt(m)} · braking"
+            St.HOLDING, St.IDLE -> "Hold ${goalTxt(m)}"
+            St.IN_USE -> "Hold ${goalTxt(m)} · phone in use"
             St.HOT -> String.format(Locale.US, "Paused: too hot (%.1f °C)", m.temp)
             St.FAST -> String.format(Locale.US, "Off: fast charging (%.1f W)", c.fastMw / 1000f)
             St.NO_READING -> "No power reading"
@@ -90,20 +88,19 @@ object Look {
     }
     fun sub(s: St, m: Monitor): String {
         val c = m.ctl; val bmw = (m.burnMw / 10f).roundToInt() * 10
-        val at = if (c.targetMah.isNaN()) "" else "at ${fmtInt(c.targetMah)} mAh · "
         return when (s) {
             St.OFF -> if (m.plugged == 0) "Plug in, then Start to hold ${planned(m)}" else "Start to hold ${planned(m)} while plugged in"
-            St.UNPLUGGED -> "brake idle · plug in to hold ${c.hold()}%"
-            St.CHARGING_UP -> "charging normally · brake idle until ${c.hold()}%"
-            St.DRAINING -> "${Drain.name(m.cfg.drainSpeed)} drain (${Drain.desc(m.cfg.drainSpeed)}) · brake ~$bmw mW · then holds"
-            St.BRAKING -> "${at}brake ~$bmw mW pulls the net to 0"
-            St.HOLDING -> "${at}brake ~$bmw mW"
-            St.IDLE -> "${at}no surplus · brake not needed"
+            St.UNPLUGGED -> "brake idle · plug in to hold ${goalTxt(m)}"
+            St.CHARGING_UP -> toGo(m, false) + "charging normally, brake idle"
+            St.DRAINING -> toGo(m, true) + "${Drain.name(m.cfg.drainSpeed)} drain (${Drain.desc(m.cfg.drainSpeed)}) · then holds"
+            St.BRAKING -> "brake ~$bmw mW pulls the net to 0"
+            St.HOLDING -> "brake ~$bmw mW"
+            St.IDLE -> "no surplus · brake not needed"
             St.IN_USE -> "phone uses more than the charger gives · brake backing off"
             St.HOT -> String.format(Locale.US, "cutoff %.0f °C · resumes below %.0f °C", m.cfg.tempCutoffC, m.cfg.tempCutoffC - 1)
             St.FAST -> String.format(Locale.US, "brake off to protect the charger · retry in %d:%02d", c.fastRetryInS / 60, c.fastRetryInS % 60)
             St.NO_READING -> "current sensor gives no data · switch mode to Auto or %"
-            St.PAUSED -> "paused by you · holding ${c.hold()}% when resumed"
+            St.PAUSED -> "paused by you · holding ${goalTxt(m)} when resumed"
         }
     }
     /** Banner action button for this state, or null. */

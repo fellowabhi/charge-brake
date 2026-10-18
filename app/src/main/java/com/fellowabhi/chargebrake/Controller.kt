@@ -26,6 +26,8 @@ class Cfg {
     @Volatile var mode = Mode.AUTO
     @Volatile var holdCurrent = true
     @Volatile var targetPct = 60
+    @Volatile var targetMahSet = Float.NaN   // target mode: the target in mAh (converted once from the % the user picked, or typed in mAh)
+    @Volatile var visCap = 0f             // render-brake capacity available now, in burn units (0 = CPU only)
     @Volatile var targetMw = 100          // net target when no mAh reading is available
     @Volatile var drainSpeed = Drain.NORMAL  // above the target: Gentle −150 mW, Normal −400 mW, Fast = max brake (temp cutoff still applies)
     @Volatile var fastCutoffMw = 6000     // 10 s average of (net + brake) above this = fast charger
@@ -80,8 +82,26 @@ class Controller(val cfg: Cfg) {
     private var winSum = 0.0
     private var reachedTarget = false
 
-    /** Lock the Hold-current target. Called only when the user enables the brake or taps Hold current. */
+    /** Lock the Hold-current target (the exact mAh now). Called only when the user enables the brake or taps Hold current. */
     fun lockHold(pct: Int, mah: Float) { holdPct = pct; holdMah = mah }
+
+    /** Most brake output: CPU (Max brake) plus the render stage when it is available. */
+    val maxOut get() = cfg.maxBurn + cfg.visCap
+
+    /** User picked a target %: convert it ONCE to mAh (middle of that % step, relative to the reading now). */
+    fun setTargetPct(p: Int, pct: Int, mah: Float) {
+        cfg.targetPct = p
+        cfg.targetMahSet = if (mah.isNaN() || pct < 0) Float.NaN else mah + (p - pct) * cfg.capacityMah / 100f
+    }
+    /** User typed the target in mAh. */
+    fun setTargetMah(v: Float, pct: Int, mah: Float) {
+        cfg.targetMahSet = v
+        if (!mah.isNaN() && pct >= 0) cfg.targetPct = (pct + (v - mah) * 100f / cfg.capacityMah).toInt().coerceIn(1, 100)
+    }
+    /** The mAh the hold aims at (NaN = not known yet -> % fallback). */
+    fun goal() = if (cfg.holdCurrent) holdMah else cfg.targetMahSet
+    /** ≈ % of an mAh value, through the reading now. */
+    fun approxPct(v: Float, pct: Int, mah: Float): Int = if (v.isNaN() || mah.isNaN()) hold() else (pct + 0.5f + (v - mah) * 100f / cfg.capacityMah).toInt()
 
     fun arm(pct: Int, mah: Float, keepHold: Boolean = false) {
         if (!keepHold || holdPct < 0) lockHold(pct, mah)
@@ -93,24 +113,29 @@ class Controller(val cfg: Cfg) {
 
     fun disarm() { burn = 0f; primed = false; lastT = -1; st = St.OFF }
 
-    /** Called on hold-mode / target changes: resets the drain/charge choice and the mAh target. */
+    /** Called on hold-mode / target changes: resets the drain/charge choice; the target mAh itself is never re-captured here. */
     fun retarget(pct: Int, mah: Float) {
-        draining = false; drainSince = Long.MIN_VALUE / 2; reachedTarget = false
-        targetMah = Float.NaN
-        if (cfg.holdCurrent) {
-            if (holdPct < 0) lockHold(pct, mah)
-            reachedTarget = true
-            if (!holdMah.isNaN()) targetMah = holdMah
-            else if (!mah.isNaN() && pct >= holdPct) { targetMah = mah - maxOf(0f, pct - holdPct - 0.5f) * cfg.capacityMah / 100f; holdMah = targetMah }
-            // below the locked % with no mAh yet: charge up, capture on reaching it (see step)
-        }
-        else if (pct >= cfg.targetPct && !mah.isNaN()) {
-            targetMah = mah - (pct - cfg.targetPct - 0.5f) * cfg.capacityMah / 100f; reachedTarget = true
-        }
+        draining = false; drainSince = Long.MIN_VALUE / 2
+        if (cfg.holdCurrent && holdPct < 0) lockHold(pct, mah)
+        derive(pct, mah)
+        targetMah = goal()
+        reachedTarget = !targetMah.isNaN() && !mah.isNaN() && mah >= targetMah - REARM_MAH
+    }
+    /** First mAh reading after a lock / % choice made without one: derive the mAh from the %. */
+    private fun derive(pct: Int, mah: Float) {
+        if (mah.isNaN() || pct < 0) return
+        if (cfg.holdCurrent) { if (holdMah.isNaN() && holdPct >= 0) holdMah = mah + (holdPct - pct) * cfg.capacityMah / 100f }
+        else if (cfg.targetMahSet.isNaN()) cfg.targetMahSet = mah + (cfg.targetPct - pct) * cfg.capacityMah / 100f
     }
 
-    /** The mAh scale changed (fuel gauge <-> counted): drop the locked mAh, keep the locked %, re-derive. */
-    fun rebase(pct: Int, mah: Float) { holdMah = Float.NaN; retarget(pct, mah) }
+    /** The mAh scale changed (fuel gauge <-> counted) and we don't know the offset: re-derive from the locked %. */
+    fun rebase(pct: Int, mah: Float) { if (cfg.holdCurrent) holdMah = Float.NaN else cfg.targetMahSet = Float.NaN; retarget(pct, mah) }
+    /** The mAh scale changed by a known offset d: move the targets with it (exact). */
+    fun shiftScale(d: Float) {
+        if (!holdMah.isNaN()) holdMah += d
+        if (!cfg.targetMahSet.isNaN()) cfg.targetMahSet += d
+        targetMah = goal()
+    }
 
     fun hold(): Int = if (cfg.holdCurrent) holdPct else cfg.targetPct
 
@@ -149,25 +174,26 @@ class Controller(val cfg: Cfg) {
         fastRetryInS = if (fastUntil >= 0) ((fastUntil - i.tMs) / 1000).toInt() else 0
         if (i.tempC >= cfg.tempCutoffC) hot = true else if (i.tempC < cfg.tempCutoffC - 1f) hot = false
 
-        // target-% mode: once the level reaches the target, lock the mAh target there
-        if (!cfg.holdCurrent && !reachedTarget && i.pct >= cfg.targetPct) { reachedTarget = true; if (i.mahOk) targetMah = i.mah + cfg.capacityMah * 0.004f }
-        if (targetMah.isNaN() && i.mahOk && reachedTarget && i.pct >= hold()) {
-            // just reached the level from below: sit 0.4 % inside the bucket so it doesn't dither at the edge
-            targetMah = if (i.pct == hold()) i.mah + cfg.capacityMah * 0.004f else i.mah - (i.pct - hold() - 0.5f) * cfg.capacityMah / 100f
-            if (cfg.holdCurrent) holdMah = targetMah
+        // the target is an exact mAh: charge up to it (brake idle), then hold it. No % rounding, no capture margin.
+        if (i.mahOk) { derive(i.pct, i.mah); targetMah = goal() }
+        val tOk = i.mahOk && !targetMah.isNaN()
+        if (tOk) {
+            if (!reachedTarget && i.mah >= targetMah) reachedTarget = true
+            else if (reachedTarget && i.mah < targetMah - REARM_MAH) reachedTarget = false   // big dip: charge back up to it
         }
 
         effMode = if (cfg.mode == Mode.AUTO) (if (i.mwOk) Mode.MW else Mode.PCT) else cfg.mode
         val h = hold()
+        val below = if (tOk && effMode == Mode.MW) !reachedTarget else i.pct < h
         when {
             paused -> { burn = 0f; st = St.PAUSED }
             fastUntil >= 0 -> { burn = 0f; st = St.FAST }
             hot -> { burn = 0f; st = St.HOT }
-            i.pct < h || (!cfg.holdCurrent && !reachedTarget) -> { burn = 0f; draining = false; st = St.CHARGING_UP }
+            below -> { burn = 0f; draining = false; st = St.CHARGING_UP }
             effMode == Mode.MW -> mw(i, dt, h, a)
             else -> pct(i, dt, h, a)
         }
-        burn = burn.coerceIn(0f, cfg.maxBurn)
+        burn = burn.coerceIn(0f, maxOut)
         return burn
     }
 
@@ -187,7 +213,7 @@ class Controller(val cfg: Cfg) {
         }
         if (draining && cfg.drainSpeed == Drain.FAST) {
             // Fast: max brake (limited by Max brake and the temperature cutoff), back off only for real phone use
-            burn += cfg.maxBurn / FAST_RAMP_S * dt
+            burn += maxOut / FAST_RAMP_S * dt
             st = St.DRAINING
             return
         }
@@ -210,7 +236,7 @@ class Controller(val cfg: Cfg) {
 
     private fun pct(i: Input, dt: Float, h: Int, a: Int) {
         tgtMw = 0f
-        val up = cfg.maxBurn / PCT_UP_S[a]
+        val up = maxOut / PCT_UP_S[a]
         if (i.pct > h) { burn += up * (if (cfg.drainSpeed == Drain.FAST) 4f else 1f) * dt; st = St.DRAINING; draining = true } else { burn -= up * 1.5f * dt; st = St.HOLDING; draining = false }
     }
 
@@ -222,8 +248,34 @@ class Controller(val cfg: Cfg) {
         const val DRAIN_START_MAH = 8f     // above the target by more than this -> drain at the chosen speed
         const val DRAIN_END_MAH = 1f
         const val FAST_RAMP_S = 20f
+        const val REARM_MAH = 20f          // more than this below the target after reaching it -> "charging up" again
         val TAU_SLOW = floatArrayOf(6f, 5f, 4f, 3f, 2.5f)
         val TAU_UP = floatArrayOf(27f, 20f, 13f, 9f, 7f)   // v0.1 / 1.5
         val PCT_UP_S = floatArrayOf(400f, 300f, 200f, 140f, 100f)
     }
+}
+
+/**
+ * Splits the controller's brake output into the render stage ("visual": the app drawing at the display's max
+ * rate with heavier effects, only in Live view while it is on screen) and CPU burn threads for the rest.
+ * Order: render first, then CPU. The total stays the controller's output, so the handoff is smooth:
+ * when the render stage goes away (app hidden, screen off) the CPU takes its share at once; when it comes
+ * back its capacity ramps in over RAMP_S, moving share from CPU to render gradually.
+ */
+class BrakeSplit(val visMwEst: Float = VIS_MW_EST) {
+    var avail = 0f; private set         // 0..1 how much of the render stage is usable now
+    var vis = 0f; private set           // render share (burn units)
+    var cpu = 0f; private set           // CPU share (burn units = duty of the burn threads)
+    var visLevel = 0f; private set      // 0..1 render intensity to apply
+    fun fullCap(burnMwFull: Float) = visMwEst / burnMwFull.coerceAtLeast(1f)
+    /** @return the render capacity (burn units) to give the controller this tick. */
+    fun update(dt: Float, renderOk: Boolean, burnMwFull: Float): Float {
+        avail = if (!renderOk) 0f else (avail + dt / RAMP_S).coerceAtMost(1f)
+        return fullCap(burnMwFull) * avail
+    }
+    fun split(total: Float, cap: Float, burnMwFull: Float) {
+        vis = minOf(total, cap).coerceAtLeast(0f); cpu = (total - vis).coerceAtLeast(0f)
+        visLevel = if (cap > 0f) (vis / fullCap(burnMwFull)).coerceIn(0f, 1f) else 0f
+    }
+    companion object { const val VIS_MW_EST = 400f; const val RAMP_S = 4f }
 }

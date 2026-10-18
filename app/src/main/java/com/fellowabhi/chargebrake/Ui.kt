@@ -17,6 +17,7 @@ fun Activity.text(size: Float, color: Int = C_TXT, bold: Boolean = false, mono: 
     textSize = size; setTextColor(color); text = txt
     typeface = Typeface.create(if (mono) Typeface.MONOSPACE else Typeface.DEFAULT, if (bold) Typeface.BOLD else Typeface.NORMAL)
     includeFontPadding = false
+    fontFeatureSettings = "tnum"      // tabular digits: numbers don't shift as they change
 }
 
 fun round(color: Int, r: Float, strokeColor: Int = 0, strokeW: Int = 0) = GradientDrawable().apply {

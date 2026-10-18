@@ -27,6 +27,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     companion object { const val EXTRA_BUBBLE = "bubble"; const val ECO_MS = 333L }
     // views (rebuilt on fold/unfold)
     private lateinit var root: ScrollView
+    private lateinit var frameV: android.widget.FrameLayout
+    private lateinit var load: RenderLoad
+    private var maxModeId = -1; private var hiRefresh = false
     private lateinit var num: TextView
     private lateinit var raw: TextView
     private lateinit var useLine: TextView
@@ -113,7 +116,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     override fun onConfigurationChanged(c: Configuration) { super.onConfigurationChanged(c); rebuild() }
 
     override fun onStart() { super.onStart(); Monitor.acquire(this); running = true; startLoop() }
-    override fun onStop() { running = false; Monitor.uiMode = Monitor.UI_NONE; Choreographer.getInstance().removeFrameCallback(this); ecoH.removeCallbacks(ecoTick); Monitor.release(); setKeepOn(false); super.onStop() }
+    override fun onStop() { applyRefresh(0f); running = false; Monitor.uiMode = Monitor.UI_NONE; Choreographer.getInstance().removeFrameCallback(this); ecoH.removeCallbacks(ecoTick); Monitor.release(); setKeepOn(false); super.onStop() }
 
     private fun rebuild() {
         val cfg = resources.configuration
@@ -121,10 +124,24 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         dots.clear(); modeTags.clear(); bgColor = 0; targetKey = ""; lastH = 0
         val content = if (wide) buildInner() else buildCover()
         root = ScrollView(this).apply { fitsSystemWindows = true; isFillViewport = true; isVerticalScrollBarEnabled = false; addView(content) }
+        load = RenderLoad(this)
+        frameV = android.widget.FrameLayout(this).apply { addView(load, -1, -1); addView(root, -1, -1) }
         // size the graphs from the real viewport height (known after the first layout)
         root.addOnLayoutChangeListener { v, _, t, _, b, _, _, _, _ -> val h = b - t - v.paddingTop - v.paddingBottom; if (h > 0 && h != lastH) { lastH = h; v.post { sizeGraphs(h) } } }
         sizeGraphs(dp(cfg.screenHeightDp - 30))
-        setContentView(root)
+        setContentView(frameV)
+    }
+
+    /** Render brake: highest refresh rate while it is in use (hysteresis), default otherwise. */
+    private fun applyRefresh(v: Float) {
+        val want = if (hiRefresh) v > 0.02f else v > 0.06f
+        if (want == hiRefresh) return
+        hiRefresh = want
+        if (maxModeId < 0) maxModeId = runCatching {
+            @Suppress("DEPRECATION") val d = windowManager.defaultDisplay; val cur = d.mode
+            d.supportedModes.filter { it.physicalWidth == cur.physicalWidth && it.physicalHeight == cur.physicalHeight }.maxByOrNull { it.refreshRate }?.modeId ?: 0
+        }.getOrDefault(0)
+        window.attributes = window.attributes.apply { preferredDisplayModeId = if (want) maxModeId else 0 }
     }
 
     /** Main graph ≈ 50 % of the viewport height (never below a readable minimum); the charge graph takes the rest. */
@@ -175,7 +192,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun hero(big: Float): View {
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(4), 0, dp(4), 0) }
         col.add(text(13f, C_DIM, txt = "Net into battery · 1.5 s average"))
-        num = text(big, C_GREEN, bold = true, txt = "+0").apply { maxLines = 1 }
+        num = text(big, C_GREEN, bold = true, txt = "+0").apply {
+            maxLines = 1; gravity = Gravity.END
+            minWidth = paint.measureText("+8,888").toInt() + 1        // fixed width: the unit doesn't move as the number changes
+        }
         val unit = text(big * 0.46f, C_GREEN, bold = true, txt = " mW").apply { maxLines = 1 }
         val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM }
         r.addView(num); r.addView(unit, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(6) })
@@ -195,13 +215,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         bSub = text(12.5f, 0xFFD9DCE1.toInt())
         t.add(bTitle); t.add(bSub, dp(3))
         banner.addView(t, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(12) })
-        bAction = text(17f, 0xFF1A0E08.toInt(), bold = true, txt = "Start").apply {
-            gravity = Gravity.CENTER; setPadding(dp(22), dp(12), dp(22), dp(12)); minWidth = dp(96)
+        bAction = text(15f, 0xFF1A0E08.toInt(), bold = true, txt = "Start").apply {
+            gravity = Gravity.CENTER; setPadding(0, 0, 0, 0); maxLines = 1
             setOnClickListener {
                 when (Look.action(Monitor.state)) { "Start" -> BrakeService.start(this@MainActivity); "Resume" -> Monitor.setPaused(false); "Ignore" -> Monitor.ignoreFast() }
             }
         }
-        banner.addView(bAction, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(10) })
+        banner.addView(bAction, LinearLayout.LayoutParams(dp(62), dp(62)).apply { leftMargin = dp(10) })   // round, compact
         return banner
     }
 
@@ -212,12 +232,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
     private fun updTarget() {
         val cfg = Monitor.cfg
-        val key = "${cfg.holdCurrent}/${Monitor.ctl.holdPct}/${Monitor.ctl.hold()}/${cfg.targetPct}/${Monitor.pct}/${Monitor.enabled}"
+        val m = Monitor
+        val key = "${cfg.holdCurrent}/${m.ctl.holdMah}/${cfg.targetMahSet}/${cfg.targetPct}/${m.pct}/${m.enabled}/${m.targetByMah}/${if (m.enabled) 0 else (m.mah / 5).toInt()}"
         if (key == targetKey) return
         targetKey = key
         targetRow.removeAllViews()
         // locked value while the brake is on; tapping it (again) re-locks at the current level
-        val lbl = if (Monitor.enabled && cfg.holdCurrent) "Hold ${Monitor.ctl.holdPct}%  ↻" else "Hold current (${Monitor.pct}%)"
+        val lbl = if (m.enabled && cfg.holdCurrent) "Hold ${m.mahLabel(m.ctl.holdMah)}  ↻"
+            else "Hold current (" + (if (m.mah.isNaN()) "${m.pct}%" else "${fmtInt(m.mah)} mAh") + ")"
         targetRow.addView(chip(lbl, cfg.holdCurrent) {
             if (Monitor.enabled) Monitor.relockHold() else if (!cfg.holdCurrent) { cfg.holdCurrent = true; Monitor.changed("hold_mode", "current") }
             targetKey = ""
@@ -226,32 +248,46 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             background = if (!cfg.holdCurrent) round(0xFF123A40.toInt(), dpf(99f), 0xFF1F6E77.toInt(), dp(1)) else round(0, dpf(99f), C_LINE, dp(1)) }
         fun btn(s: String, d: Int) = text(18f, C_TXT, bold = true, txt = s).apply {
             gravity = Gravity.CENTER; setPadding(dp(14), dp(4), dp(14), dp(6))
-            setOnClickListener { setTarget(cfg.targetPct + d) }
+            setOnClickListener { setTarget(d) }
         }
         step.addView(btn("−", -1))
-        step.addView(text(13f, if (!cfg.holdCurrent) 0xFF7FE3EE.toInt() else C_DIM, txt = "Target ${cfg.targetPct}%").apply {
+        val tTxt = if (m.targetByMah && !cfg.targetMahSet.isNaN()) "Target ${fmtInt(cfg.targetMahSet)} mAh"
+            else if (!cfg.holdCurrent && !cfg.targetMahSet.isNaN()) "Target ${cfg.targetPct}% · ${fmtInt(cfg.targetMahSet)} mAh" else "Target ${cfg.targetPct}%"
+        step.addView(text(13f, if (!cfg.holdCurrent) 0xFF7FE3EE.toInt() else C_DIM, txt = tTxt).apply {
             setPadding(dp(4), dp(7), dp(4), dp(7))
             setOnClickListener { if (cfg.holdCurrent) { cfg.holdCurrent = false; Monitor.changed("hold_mode", "target", true); targetKey = "" } }
         })
         step.addView(btn("+", +1))
         targetRow.addView(step)
     }
-    private fun setTarget(v: Int) {
-        val cfg = Monitor.cfg
-        cfg.targetPct = v.coerceIn(20, 100)
-        val modeChanged = cfg.holdCurrent
-        cfg.holdCurrent = false
-        if (modeChanged) Monitor.changed("hold_mode", "target") 
-        Monitor.changed("target_pct", cfg.targetPct, true); targetKey = ""
+    /** Stepper: ±1 % (converted once to mAh) or ±10 mAh when the target is entered in mAh. */
+    private fun setTarget(d: Int) {
+        val m = Monitor; val cfg = m.cfg
+        if (m.targetByMah && !cfg.targetMahSet.isNaN()) m.setTargetMah(cfg.targetMahSet + 10f * d)
+        else m.setTargetPct((if (cfg.holdCurrent) cfg.targetPct else cfg.targetPct + d).coerceIn(20, 100))
+        targetKey = ""
     }
 
     private fun key(label: String, color: Int) = row(View(this).apply { background = round(color, dpf(2f)) }, text(12f, C_DIM, txt = label), gap = 6)
         .also { it.getChildAt(0).layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)) }
 
-    /** Auto-sizing single-line value: shrinks instead of clipping. */
-    private fun value(maxSp: Float) = text(maxSp, C_TXT, bold = true).apply {
+    /**
+     * Single-line value with a FIXED size: sized once (per layout width) so that the widest expected text
+     * (`template`) fits. Tabular digits, so changing values never resize or shift anything.
+     */
+    private fun value(maxSp: Float, template: String) = text(maxSp, C_TXT, bold = true).apply {
         maxLines = 1
-        setAutoSizeTextTypeUniformWithConfiguration(11, maxSp.roundToInt(), 1, TypedValue.COMPLEX_UNIT_SP)
+        addOnLayoutChangeListener { v, l, _, r, _, ol, _, or0, _ ->
+            val w = r - l
+            if (w > 0 && w != or0 - ol) {
+                val tv = v as TextView
+                val p = android.graphics.Paint(tv.paint); p.textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, maxSp, resources.displayMetrics)
+                val avail = w - tv.paddingLeft - tv.paddingRight
+                val tw = p.measureText(template)
+                val sp = if (tw > avail) maxSp * avail / tw else maxSp
+                tv.post { tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, maxOf(10f, sp)) }
+            }
+        }
     }
 
     /** The 4 tiles as a 2×2 grid. */
@@ -262,17 +298,17 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             sub.forEach { f.add(it, dp(2)) }
             return f
         }
-        batV = value(vs); batS = text(11.5f, C_DIM); batSrc = text(11f, C_FAINT)
-        brkV = value(vs); brkBar = BarView(this).apply { color = C_ORANGE }; brkS = text(11f, C_DIM)
-        surV = value(vs); surS = text(11f, C_DIM, txt = "net + brake power")
-        tmpV = value(vs); tmpBar = BarView(this).apply { gradient = true }; tmpS = text(11f, C_DIM)
+        batV = value(vs, "100%"); batS = text(11.5f, C_DIM); batSrc = text(11f, C_FAINT)
+        brkV = value(vs, "100%"); brkBar = BarView(this).apply { color = C_ORANGE }; brkS = text(11f, C_DIM)
+        surV = value(vs, "~+18,888 mW"); surS = text(11f, C_DIM, txt = "net + brake power")
+        tmpV = value(vs, "88.8 °C"); tmpBar = BarView(this).apply { gradient = true }; tmpS = text(11f, C_DIM)
         fun barBox(b: BarView) = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(b, LinearLayout.LayoutParams(-1, dp(5)).apply { topMargin = dp(3); bottomMargin = dp(2) }) }
         val t1 = tile("Battery", C_BLUE, batV, batS, batSrc)
         brkTile = tile("Brake level", C_ORANGE, brkV, barBox(brkBar), brkS)
         val t3 = tile("Charger surplus", C_AMBER, surV, surS)
         val t4 = tile("Temperature", C_GREY, tmpV, barBox(tmpBar), tmpS)
         // hold quality: full-width compact tile, only while holding
-        qV = value(vs * 0.8f); qS = text(11f, C_DIM)
+        qV = value(vs * 0.8f, "~88 h 88 m per 1%"); qS = text(11f, C_DIM)
         qTile = GlowFrame(this).apply { pad(dp(10), dp(7), dp(10), dp(8)) }
         val qHead = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         qKey = View(this).apply { background = round(C_GREEN, dpf(2f)) }
@@ -438,7 +474,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             val c = root.getChildAt(0)
             fun save(v: View, w: Int, h: Int, name: String) {
                 val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
-                val cv = android.graphics.Canvas(bmp); cv.drawColor(C_BG); root.background?.let { it.setBounds(0, 0, w, h); it.draw(cv) } ?: cv.drawColor(C_BG)
+                val cv = android.graphics.Canvas(bmp); cv.drawColor(C_BG); frameV.background?.let { it.setBounds(0, 0, w, h); it.draw(cv) } ?: cv.drawColor(C_BG)
                 v.draw(cv)
                 java.io.FileOutputStream(java.io.File(dir, name)).use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
             }
@@ -506,16 +542,25 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             bAction.visibility = View.VISIBLE
             if (bAction.text != act) bAction.text = act
             val bc = if (act == "Ignore") C_GREY else C_ORANGE
-            bAction.background = round(lerpColor(bc, 0xFFFFFFFF.toInt(), 0.10f * pulse), dpf(99f))
+            bAction.textSize = if (act.length > 5) 12.5f else 15f
+            bAction.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(lerpColor(bc, 0xFFFFFFFF.toInt(), 0.10f * pulse)) }
         }
-        banner.glowColor = dGlow; banner.glow = 0.7f + 0.3f * pulse; banner.tint = 1.4f; banner.stroke = 1f; banner.invalidate()
+        // render brake (Live only): drifting glow layers + max refresh rate + stronger glows
+        val vis = if (live) m.visLevel else 0f
+        load.color = dGlow; if (vis > 0.005f || load.level > 0f) { load.level = vis; load.invalidate() }
+        applyRefresh(vis)
+        val boost = 1f + 0.6f * vis
+        banner.glowColor = dGlow; banner.glow = (0.7f + 0.3f * pulse) * boost; banner.tint = 1.4f; banner.stroke = 1f; banner.invalidate()
 
         batV.text = "${m.pct}%"
         batS.text = if (m.mah.isNaN()) "— mAh" else fmtInt(m.mah) + " mAh" + (if (m.enabled && !c.targetMah.isNaN()) " · target " + fmtInt(c.targetMah) else "")
         batSrc.text = "source: " + m.mahT.source
-        brkV.text = "${(dBurn * 100).toInt()}%"; brkBar.frac = dBurn; brkBar.invalidate()
-        brkS.text = "${m.threads} threads · ~${fmtInt(m.burnMw)} mW"
-        brkTile.glowColor = C_ORANGE; brkTile.glow = (dBurn / 0.8f).coerceIn(0f, 1f) * 0.8f; brkTile.stroke = brkTile.glow; brkTile.invalidate()
+        // brake = % of the most it can do now (CPU max + render stage); bar: teal = visual, orange = CPU
+        val mo = c.maxOut.coerceAtLeast(0.01f)
+        brkV.text = "${(dBurn / mo * 100).roundToInt().coerceIn(0, 100)}%"; brkBar.frac = dBurn / mo; brkBar.visFrac = m.split.vis / mo; brkBar.invalidate()
+        brkS.text = if (m.split.vis > 0.005f || m.renderOk) "visual ~${fmtInt(m.visMw)} · CPU ~${fmtInt(m.cpuMw)} mW"
+            else "${m.effThreads} threads${if (m.power == Monitor.P_MAX) " (normal prio)" else ""} · ~${fmtInt(m.burnMw)} mW"
+        brkTile.glowColor = C_ORANGE; brkTile.glow = (dBurn / mo).coerceIn(0f, 1f) * 0.8f; brkTile.stroke = brkTile.glow; brkTile.invalidate()
         surV.text = if (m.plugged == 0) "n/a" else "~" + fmtSigned(dSur) + " mW"
         surS.text = if (m.plugged == 0) "not plugged in" else "net + brake power"
         tmpV.text = String.format(Locale.US, "%.1f °C", dTemp)
@@ -541,9 +586,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         brakeTitle.text = if (m.enabled) "Brake ON" else "Brake OFF"
         brakeCard.glowColor = dGlow; brakeCard.glow = if (m.enabled) 0.6f else 0f; brakeCard.tint = if (m.enabled) 0.8f else 0f; brakeCard.stroke = brakeCard.glow; brakeCard.invalidate()
         val plugged = m.plugged != 0
-        setKeepOn(plugged && live)
-        screenOn.text = when { !live -> "Eco view · normal screen timeout"; plugged -> "☀ Live: screen stays on while plugged"; else -> "Live: screen on only while plugged in" }
-        screenOn.setTextColor(if (plugged && live) C_GREEN else C_DIM)
+        setKeepOn(plugged)
+        screenOn.text = (if (plugged) "☀ Screen stays on while plugged" else "Screen on: only while plugged in") + (if (live) " · Live" else " · Eco")
+        screenOn.setTextColor(if (plugged) C_GREEN else C_DIM)
         val bOn = m.bubble && Settings.canDrawOverlays(this)
         bubPill.pos += ((if (bOn) 1f else 0f) - bubPill.pos) * (1f - exp(-dt / 0.12f)); bubPill.invalidate()
         bubSub.text = when { !bOn -> "over other apps · tap to turn on"; m.enabled -> "on · tap it to expand, long-press to open"; else -> "on · shows while Brake is on" }
@@ -553,7 +598,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
 
         if (bgColor == 0 || dGlow != bgColor) {
             bgColor = dGlow
-            root.background = GradientDrawable().apply {
+            frameV.background = GradientDrawable().apply {
                 gradientType = GradientDrawable.RADIAL_GRADIENT; gradientRadius = root.width.coerceAtLeast(1) * 0.9f; setGradientCenter(0.75f, 0f)
                 colors = intArrayOf(withAlpha(dGlow, 0.11f), C_BG)
             }

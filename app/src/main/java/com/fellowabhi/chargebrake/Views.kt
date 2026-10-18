@@ -49,6 +49,7 @@ class GlowFrame(ctx: Context) : LinearLayout(ctx) {
 /** Eased progress bar. */
 class BarView(ctx: Context) : View(ctx) {
     var frac = 0f; var color = C_ORANGE; var gradient = false; var glow = false
+    var visFrac = 0f                       // first part of the bar in teal (render brake), the rest in `color`
     private val p = Paint(Paint.ANTI_ALIAS_FLAG); private val rect = RectF()
     override fun onDraw(c: Canvas) {
         val h = height.toFloat(); val r = h / 2
@@ -58,7 +59,34 @@ class BarView(ctx: Context) : View(ctx) {
         if (rect.right < 1f) return
         if (gradient) p.shader = LinearGradient(0f, 0f, width.toFloat(), 0f, C_GREEN, C_AMBER, Shader.TileMode.CLAMP) else p.color = color
         c.drawRoundRect(rect, r, r, p)
+        if (visFrac > 0.005f) { p.shader = null; p.color = C_TEAL; rect.right = width * minOf(visFrac, frac).coerceIn(0f, 1f); c.drawRoundRect(rect, r, r, p) }
     }
+}
+
+/**
+ * Render brake: soft drifting glows behind the content, redrawn every frame (Live view only). The number of
+ * blurred layers follows `level` (0..1); the controller treats this drawing as the first stage of the brake.
+ */
+class RenderLoad(ctx: Context) : View(ctx) {
+    var level = 0f; var color = C_ORANGE
+    private val d = ctx.resources.displayMetrics.density
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val blurs = Array(4) { BlurMaskFilter((30 + 12 * it) * d, BlurMaskFilter.Blur.NORMAL) }
+    override fun onDraw(c: Canvas) {
+        if (level < 0.01f) return
+        val n = 1 + (level * (MAX_LAYERS - 1)).toInt()
+        val t = SystemClock.uptimeMillis() / 1000.0
+        val w = width.toFloat(); val h = height.toFloat()
+        for (k in 0 until n) {
+            val ph = k * 1.7
+            val x = w * (0.5f + 0.46f * sin(t * 0.13 * (1 + k % 5) + ph).toFloat())
+            val y = h * (0.5f + 0.46f * kotlin.math.cos(t * 0.11 * (1 + k % 3) + ph * 1.3).toFloat())
+            p.maskFilter = blurs[k % blurs.size]
+            p.color = withAlpha(if (k % 2 == 0) color else C_TEAL, 0.03f * (0.6f + level))
+            c.drawCircle(x, y, (60f + (k % 4) * 22f + 6f * sin(t * 2 + k).toFloat()) * d, p)
+        }
+    }
+    companion object { const val MAX_LAYERS = 24 }
 }
 
 /** Pulsing LIVE dot. */
@@ -252,10 +280,10 @@ class ChargeView(ctx: Context, private val h: ChargeHistory) : View(ctx) {
                 if (inside) c.drawLine(L, ty, L + W, ty, pTgt)
                 val st = m.state
                 val lbl = when {
-                    !tgtLive -> "target ${m.cfg.targetPct}% ≈ ${fmtInt(tgt)} mAh (when started)"
-                    st == St.DRAINING && !m.mah.isNaN() -> "target ${m.ctl.hold()}% · ${fmtInt(tgt)} mAh · ~${fmtInt(maxOf(0f, m.mah - tgt))} mAh to go"
-                    st == St.CHARGING_UP && !m.mah.isNaN() -> "target ${m.ctl.hold()}% ≈ ${fmtInt(tgt)} mAh · ${fmtInt(maxOf(0f, tgt - m.mah))} mAh to go"
-                    else -> "hold ${m.ctl.hold()}% · ${fmtInt(tgt)} mAh"
+                    !tgtLive -> "target ${m.mahLabel(tgt)} (when started)"
+                    st == St.DRAINING && !m.mah.isNaN() -> "target ${m.mahLabel(tgt)} · ~${fmtInt(maxOf(0f, m.mah - tgt))} mAh to go"
+                    st == St.CHARGING_UP && !m.mah.isNaN() -> "target ${m.mahLabel(tgt)} · ${fmtInt(maxOf(0f, tgt - m.mah))} mAh to go"
+                    else -> "hold ${m.mahLabel(tgt)}"
                 }.let { if (inside) it else (if (tgt > hi) "↑ " else "↓ ") + it }
                 pTgtTxt.color = if (tgtLive) C_GREEN else C_DIM; pTgtTxt.textAlign = Paint.Align.LEFT
                 val above = if (inside) ty - 5 * d > T + 2 * d else tgt > hi

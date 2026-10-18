@@ -4,6 +4,14 @@ Android app that holds your battery level on a slow charger, without root.
 It reads live battery power and, when the phone is gaining charge, adds just enough
 low-priority CPU load ("brake") to keep net power around 0. No ads, no analytics, no internet permission.
 
+**v0.5.1**
+- **Render brake first, then CPU** (Live view, only while the app is on screen): the brake output goes to the app's own drawing first (max display refresh rate, drifting glow layers, stronger glows), CPU threads only for the rest. Screen off / app hidden: CPU only, and the CPU takes over the render share at once (no step); when the render stage comes back it ramps in over 4 s. Eco has no render brake. The brake tile and Details show visual vs CPU (teal / orange bar).
+- **Exact mAh target**: a target % is converted once to mAh (middle of that % step) and held exactly; Hold current locks the exact mAh now. Optional: enter the target in mAh (Details, stepper ±10 mAh). Banner / bubble: "Hold 2,916 mAh (≈60%)". Targets move with the mAh scale when the source switches.
+- Round compact Start / Resume / Ignore button in the banner.
+- **Max brake power**: Normal (Max brake %, threads), High (all cores 100 %), Max (all cores 100 %, normal priority). Temperature cutoff always applies.
+- Screen stays on while plugged in Eco too.
+- No UI jumping: tabular digits everywhere, fixed-size tile values (sized once from the widest expected text), fixed-width big number.
+
 **v0.4**
 - **Floating bubble** over other apps ("Display over other apps" permission, asked on first use). Toggle in the app or from the notification. Outer ring = net power (blue ← green → amber scale, ticks at the ±100 mW holding band), inner ring = brake. Tap = small / expanded pill (remembered); the pill shows net, state, the target (Hold 60% · 2,916 mAh, or 54% → 56% · 97 mAh to go while charging up / draining), brake, temperature, hold quality and a 30 s sparkline. Drag to move, snaps to the nearest side (remembered); long-press or tap the pill text to open the app. Soft green halo + ✓ when the hold is healthy. ~1 Hz values, ~400 ms easing, then idle; paused while the screen is off. Runs from the brake service (shown while Brake is on).
 - **Eco view** (default): ~3 Hz updates, no pulse/glow loops, normal screen timeout. Tap LIVE/ECO to switch to Live (every-frame updates, screen on while plugged).

@@ -9,22 +9,23 @@ class Burner {
     var threads = 0; private set
     @Volatile var sink = 0.0
 
-    fun start(n: Int) {
+    var normalPriority = false; private set
+    fun start(n: Int, normalPrio: Boolean = false) {
         stop()
         val g = ++gen
-        threads = n
+        threads = n; normalPriority = normalPrio
         repeat(n) { k ->
-            Thread({ loop(g) }, "burn$k").apply { isDaemon = true; start() }
+            Thread({ loop(g, normalPrio) }, "burn$k").apply { isDaemon = true; start() }
         }
     }
 
     fun stop() { gen++; threads = 0; level = 0f }
 
-    private fun loop(g: Int) {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_LOWEST)
+    private fun loop(g: Int, normalPrio: Boolean) {
+        Process.setThreadPriority(if (normalPrio) Process.THREAD_PRIORITY_DEFAULT else Process.THREAD_PRIORITY_LOWEST)
         var x = 1.0
         while (g == gen) {
-            val l = level
+            val l = level.coerceAtMost(1f)
             if (l <= 0.002f) { Thread.sleep(100); continue }
             val busy = (PERIOD_NS * l).toLong()
             val t0 = System.nanoTime()

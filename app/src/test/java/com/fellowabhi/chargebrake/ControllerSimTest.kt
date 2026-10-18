@@ -44,9 +44,11 @@ class FakePhone(
     val pct get() = floor(mahTrue / capMah * 100f).toInt()
     private fun gauss() = (r.nextFloat() + r.nextFloat() + r.nextFloat() + r.nextFloat() - 2f) * 1.73f
 
-    fun step(dt: Float, burnCmd: Float) {
+    var visActual = 0f              // real render-stage power (mW)
+    fun step(dt: Float, burnCmd: Float, visMw: Float = 0f) {
         t += dt
         burnActual += (burnCmd - burnActual) * dt / 0.5f
+        visActual += (visMw - visActual) * dt / 0.2f
         temp += (35f + heatC * burnActual - temp) * dt / 120f
         if (spikes) {
             if (spikeLeft <= 0f) {
@@ -55,7 +57,7 @@ class FakePhone(
             } else spikeLeft -= dt
         }
         val charger = if (!plugged) 0f else if (t < surgeS) surgeMw else steadyMw
-        trueNet = charger - baseMw - burnActual * burnGain - usageMw
+        trueNet = charger - baseMw - burnActual * burnGain - visActual - usageMw
         mahTrue += trueNet / 3.95f * dt / 3600f
         win.addLast(trueNet); while (win.size > 10) win.removeFirst()
         sinceUpdate += dt
@@ -73,21 +75,26 @@ class ControllerSimTest {
               val mahErrMax: Float, val mahErrEnd: Float, val useTrig: Int)
 
     private fun run(p: FakePhone, cfg: Cfg, hours: Float, statsAfterS: Float = 2700f, mwOk: Boolean = true,
+                    split: BrakeSplit? = null, renderOn: (Float) -> Boolean = { false }, visRealMw: Float = 0f,
                     onTick: (Float, Controller, MahTracker) -> Unit = { _, _, _ -> }): Res {
+        var visMw = 0f
         val c = Controller(cfg); val mt = MahTracker()
         val dt = 0.05f; var nextCtl = 0f; var cmd = 0f; var armed = false
         var n = 0; var sN = 0.0; var sN2 = 0.0; var sB = 0.0
         var pMin = 999; var pMax = -1; var errMax = 0f; var errEnd = 0f; var useTrig = 0; var wasUse = false
         val bl = ArrayList<Float>(); val zf = ZeroFilter()
         while (p.t < hours * 3600f) {
-            p.step(dt, cmd)
+            p.step(dt, if (split != null) split.cpu else cmd, visMw)
             if (p.t >= nextCtl) {
                 nextCtl += 0.25f
                 val tMs = (p.t * 1000).toLong()
                 val mA = zf.filter(Math.round(p.sensorMw / 3.95f * 1000)) / 1000f
                 if (mt.update(tMs, p.gaugeUah, mA, mwOk, p.pct, cfg.capacityMah) && armed) c.retarget(p.pct, mt.mah)
                 if (!armed) { c.arm(p.pct, mt.mah); armed = true }
+                val cap = split?.update(0.25f, renderOn(p.t), cfg.burnMwFull) ?: 0f
+                cfg.visCap = cap
                 cmd = c.step(Input(tMs, if (mwOk) mA * 3.95f else 0f, mwOk, p.pct, p.plugged, p.temp, mt.mah))
+                if (split != null) { split.split(cmd, cap, cfg.burnMwFull); visMw = split.visLevel * visRealMw }
                 onTick(p.t, c, mt)
                 val use = c.st == St.IN_USE
                 if (use && !wasUse) useTrig++
@@ -112,7 +119,7 @@ class ControllerSimTest {
         name, r.meanNet, r.sdNet, r.meanBurn * 100, r.jitter * 100, r.pctMin, r.pctMax, r.mahErrMax, r.mahErrEnd, r.useTrig)
 
     @Test fun holdWithFieldNoise() {
-        println("=== Charge Brake v0.4 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===")
+        println("=== Charge Brake v0.5.1 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===")
         for ((name, p) in listOf(
             "field: surplus +700 mW, gain 1.2 W" to FakePhone(1),
             "weak burn gain 0.8 W" to FakePhone(2, burnGain = 800f, steadyMw = 1500f),
@@ -127,6 +134,58 @@ class ControllerSimTest {
             assertTrue(name, r.mahErrMax < 12f)
             assertTrue(name, r.useTrig <= 24)   // noise alone must rarely look like phone use (<= 8/h)
         }
+    }
+
+    /** Render stage first, CPU for the rest; the app goes on/off screen (and the real render power differs from the estimate). */
+    @Test fun renderStageHandoff() {
+        println("=== render brake (Live view on screen) first, then CPU; on screen 10 min / hidden 5 min ===")
+        for ((name, visReal) in listOf("render 400 mW (= estimate)" to 400f, "render 250 mW (estimate 400)" to 250f, "render 700 mW (estimate 400)" to 700f)) {
+            val p = FakePhone(60, surgeS = 0f)
+            val sp = BrakeSplit()
+            var visOnS = 0f; var visSum = 0.0; var cpuSum = 0.0; var n = 0
+            val avg = ArrayDeque<Float>(); var worst = 0f; var lastS = 0f
+            val on = { t: Float -> (t % 900f) < 600f }
+            val r = run(p, Cfg(), 3f, split = sp, renderOn = on, visRealMw = visReal) { t, _, _ ->
+                if (t > 1800f) {
+                    if (on(t)) { visOnS += 0.25f; visSum += sp.vis; cpuSum += sp.cpu; n++ }
+                    if (t - lastS >= 1f) { lastS = t; avg.addLast(p.trueNet); if (avg.size > 30) avg.removeFirst(); if (avg.size == 30) worst = maxOf(worst, abs(avg.average().toFloat())) }
+                }
+            }
+            val visShare = (visSum / maxOf(1e-9, visSum + cpuSum)).toFloat()
+            println(line(name, r) + String.format(" | on screen: render %.0f%% of the brake | worst 30 s net %+.0f mW", visShare * 100, worst))
+            assertTrue(name, abs(r.meanNet) < 100f)
+            assertTrue(name, r.pctMax - r.pctMin <= 1)
+            assertTrue(name, r.mahErrMax < 12f)
+            assertTrue(name, visShare > 0.3f)           // render goes first
+            assertTrue(name, worst < 450f)              // handoffs don't kick the net far
+            assertTrue(name, r.jitter < 0.08f)          // no oscillation
+        }
+        // with the render stage off it must equal the CPU-only controller
+        val a = run(FakePhone(61, surgeS = 0f), Cfg(), 1.5f); val b = run(FakePhone(61, surgeS = 0f), Cfg(), 1.5f, split = BrakeSplit())
+        assertEquals(a.meanNet, b.meanNet, 0.01f)
+        val s2 = BrakeSplit(); s2.update(10f, true, 1500f); s2.split(0.5f, s2.update(0f, true, 1500f), 1500f)
+        assertEquals(400f / 1500f, s2.vis, 1e-4f); assertEquals(0.5f - 400f / 1500f, s2.cpu, 1e-4f)
+        s2.split(0.5f, s2.update(0.25f, false, 1500f), 1500f)   // app hidden: CPU takes the whole output at once
+        assertEquals(0f, s2.vis, 0f); assertEquals(0.5f, s2.cpu, 1e-6f)
+    }
+
+    /** Exact mAh target: charges up to it and holds it, not the % step. */
+    @Test fun exactMahTarget() {
+        val cfg = Cfg().apply { holdCurrent = false; capacityMah = 4860f }
+        val c = Controller(cfg)
+        c.setTargetPct(60, 57, 2790f)                      // at 57 % (2,790 mAh) the user picks 60 %
+        assertEquals(2790f + 3 * 48.6f, cfg.targetMahSet, 0.01f)
+        c.setTargetMah(2916f, 57, 2790f); assertEquals(2916f, cfg.targetMahSet, 0f); assertEquals(59, cfg.targetPct)
+        val p = FakePhone(70, startPct = 57.4f, surgeS = 0f)
+        val cfg2 = Cfg().apply { holdCurrent = false; targetPct = 60 }
+        var tgt = Float.NaN; var first = Float.NaN
+        val r = run(p, cfg2, 4f, statsAfterS = 2.5f * 3600f) { _, cc, _ -> if (first.isNaN() && !cc.targetMah.isNaN()) first = cc.targetMah; tgt = cc.targetMah }
+        println(line("target 60% -> exact mAh", r) + String.format(" | target %.1f mAh (converted once, end %.1f)", first, tgt))
+        assertEquals("converted once", first, tgt, 0.01f)
+        assertTrue(r.mahErrMax < 6f && abs(r.mahErrEnd) < 3f)
+        // hold current locks the exact mAh
+        val c3 = Controller(Cfg()); c3.arm(55, 2697.3f); assertEquals(2697.3f, c3.targetMah, 0f)
+        c3.shiftScale(12.5f); assertEquals(2709.8f, c3.targetMah, 0.01f)
     }
 
     @Test fun usageDips() {
@@ -180,13 +239,15 @@ class ControllerSimTest {
                 val cfg = Cfg().apply { holdCurrent = false; targetPct = 55; drainSpeed = speed }
                 val p = if (phone == 0) FakePhone(20 + speed, startPct = 57.5f, surgeS = 0f, heatC = 14f)
                         else FakePhone(30 + speed, startPct = 57.5f, surgeS = 0f, burnGain = 3000f, heatC = 14f)
-                var reached = -1f; var drainS = 0f; var drainNet = 0.0; var drainN = 0; var sawDrain = false
+                var reached = -1f; var reachedMah = -1f; var drainS = 0f; var drainNet = 0.0; var drainN = 0; var sawDrain = false
                 var drainAfter = 0; var tMax = 0f; var hotSeen = false; var wasDrain = false
                 val r = run(p, cfg, 7f, statsAfterS = 6f * 3600f) { t, c, _ ->
                     val d = c.st == St.DRAINING
                     if (d) { sawDrain = true; drainN++; drainNet += p.trueNet; drainS += 0.25f }
                     if (reached < 0 && p.pct <= 55) reached = t
-                    if (reached >= 0 && t > reached + 1800f && d && !wasDrain) drainAfter++
+                    // the target is an exact mAh (mid 55 %): count re-drains only after that mAh was reached
+                    if (reachedMah < 0 && !c.targetMah.isNaN() && p.mahTrue <= c.targetMah + Controller.DRAIN_END_MAH) reachedMah = t
+                    if (reachedMah >= 0 && t > reachedMah + 1800f && d && !wasDrain) drainAfter++
                     wasDrain = d
                     tMax = maxOf(tMax, p.temp); if (c.st == St.HOT) hotSeen = true
                 }
