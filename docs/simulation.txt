@@ -1,33 +1,49 @@
+
+=== app open the whole time on a weak charger (app minimum 250 mW + visuals up to 600 mW real) ===
+weak +400 mW, charging up to target  net  +150 mW (sd    0) | burn  0.0% jitter  0.0% | level 59-61% | mAh err max  74.8 end -21.9 | in-use trig 0 | visual level 0.00, CPU max 0%
+weak +400 mW, hold current           net    +0 mW (sd   67) | burn  8.3% jitter  2.8% | level 60-60% | mAh err max   0.7 end  +0.2 | in-use trig 1 | visual level 0.25, CPU max 0%
+very weak +150 mW, hold current      net  -100 mW (sd    1) | burn  0.0% jitter  0.0% | level 59-60% | mAh err max  35.6 end -35.6 | in-use trig 103 | visual level 0.00, CPU max 0%
 === drain: start 57.5%, target 55% (5 W charger, steady) ===
-field phone (gain 1.2 W)   Gentle net while draining  -112 mW | reached 55% after 163.3 min | then level 55-55%, mAh err max  1.2 | temp max 45.0°C (hot pause) | re-drains 0
-field phone (gain 1.2 W)   Normal net while draining  -174 mW | reached 55% after 159.3 min | then level 55-55%, mAh err max  1.1 | temp max 45.0°C (hot pause) | re-drains 0
+field phone (gain 1.2 W)   Gentle net while draining  -112 mW | reached 55% after 164.2 min | then level 55-55%, mAh err max  1.0 | temp max 45.0°C (hot pause) | re-drains 0
+field phone (gain 1.2 W)   Normal net while draining  -192 mW | reached 55% after 149.9 min | then level 55-55%, mAh err max  1.0 | temp max 45.0°C (hot pause) | re-drains 0
 field phone (gain 1.2 W)   Fast   net while draining  -176 mW | reached 55% after 158.3 min | then level 55-55%, mAh err max  1.3 | temp max 45.0°C (hot pause) | re-drains 0
-strong brake (gain 3 W)    Gentle net while draining  -129 mW | reached 55% after 133.9 min | then level 55-55%, mAh err max  1.4 | temp max 39.2°C | re-drains 0
-strong brake (gain 3 W)    Normal net while draining  -347 mW | reached 55% after  46.8 min | then level 55-55%, mAh err max  1.3 | temp max 40.3°C | re-drains 0
-strong brake (gain 3 W)    Fast   net while draining -1515 mW | reached 55% after  12.8 min | then level 55-55%, mAh err max  1.0 | temp max 45.0°C (hot pause) | re-drains 0
+strong brake (gain 3 W)    Gentle net while draining  -132 mW | reached 55% after 129.7 min | then level 55-55%, mAh err max  1.3 | temp max 39.2°C | re-drains 0
+strong brake (gain 3 W)    Normal net while draining  -355 mW | reached 55% after  45.8 min | then level 55-55%, mAh err max  1.2 | temp max 40.3°C | re-drains 0
+strong brake (gain 3 W)    Fast   net while draining -1515 mW | reached 55% after  12.8 min | then level 55-55%, mAh err max  0.7 | temp max 45.0°C (hot pause) | re-drains 0
 zero filter: [500, 0, 520, 0, 0, 0, 480] -> [500, 500, 520, 520, 0, 0, 480]
 hold lock + restart                  after restart at 54%: hold 55%, target 2680 mAh
-hold current, dip (gauge=true)       locked 55% / 2697 mAh | dip to 51% (Charging up to 55%) | target after 2697 mAh | then level 55-55%, mAh err max 0.9
-hold current, dip (gauge=false)      locked 55% / 2697 mAh | dip to 51% (Charging up to 55%) | target after 2710 mAh | then level 55-55%, mAh err max 2.9
-no fuel gauge -> coulomb counting    net    -3 mW (sd   72) | burn 58.5% jitter  3.9% | level 60-60% | mAh err max   2.4 end  -1.7 | in-use trig 6
+hold current, dip (gauge=true)       locked 55% / 2697 mAh | dip to 51% (Charging up to 55%) | target after 2697 mAh | then level 55-55%, mAh err max 0.8
+hold current, dip (gauge=false)      locked 55% / 2697 mAh | dip to 51% (Charging up to 55%) | target after 2710 mAh | then level 55-55%, mAh err max 3.2
+=== brake response: ±600 mW charger steps (field noise); settle = true net (5 s avg) within ±100 mW of the net target for 20 s, mean of 3 runs ===
+Gentle (gain 1200)   settle up  98.1 s / down  47.1 s | overshoot 106 / 183 mW | steady: net  -2 mW, sd  52 mW, burn jitter  1.8%, in-use  0 | in-app measure: 40.2 s (n=6)
+Calm (gain 1200)     settle up  58.4 s / down  25.4 s | overshoot 129 / 149 mW | steady: net  +4 mW, sd  45 mW, burn jitter  2.3%, in-use  0 | in-app measure: 45.7 s (n=5)
+Normal (gain 1200)   settle up  55.3 s / down  24.9 s | overshoot 116 / 187 mW | steady: net  +1 mW, sd  58 mW, burn jitter  3.5%, in-use  4 | in-app measure: 29.1 s (n=4)
+Quick (gain 1200)    settle up  25.0 s / down  16.3 s | overshoot 122 / 192 mW | steady: net  +3 mW, sd  73 mW, burn jitter  4.3%, in-use  3 | in-app measure: 12.4 s (n=3)
+Fast (gain 1200)     settle up  36.7 s / down  17.7 s | overshoot 168 / 191 mW | steady: net  +0 mW, sd  73 mW, burn jitter  4.8%, in-use  0 | in-app measure: 7.6 s (n=2)
+Direct (gain 1200)   settle up  24.9 s / down  24.7 s | overshoot 196 / 185 mW | steady: net  -1 mW, sd  79 mW, burn jitter  5.1%, in-use  3 | in-app measure: 34.4 s (n=2)
+Normal (gain 3000)   settle up  55.4 s / down  30.5 s | overshoot 310 / 184 mW | steady: net  +1 mW, sd  96 mW, burn jitter  2.8%, in-use  5 | in-app measure: 7.5 s (n=1)
+Direct (gain 3000)   settle up  54.4 s / down 121.7 s | overshoot 280 / 188 mW | steady: net  -0 mW, sd 138 mW, burn jitter  4.2%, in-use 11 | in-app measure: 0.0 s (n=0)
+no fuel gauge -> coulomb counting    net    -2 mW (sd   63) | burn 58.5% jitter  3.1% | level 60-60% | mAh err max   2.2 end  -1.5 | in-use trig 5
 no mW reading -> % fallback (6 h)    net    -0 mW (sd  154) | burn 58.3% jitter  7.0% | level 60-61% | mAh err max  24.8 end +24.0 | in-use trig 0
+=== adaptive visuals (app on screen) first both ways, then CPU; on screen 10 min / hidden 5 min; app minimum 250 mW ===
+visuals 500 mW (= estimate)          net    -1 mW (sd   80) | burn 40.1% jitter  3.8% | level 60-60% | mAh err max   1.1 end  +0.5 | in-use trig 5 | on screen: visuals 86% of the brake | worst 30 s net +259 mW
+visuals 300 mW (estimate 500)        net    -2 mW (sd   65) | burn 49.6% jitter  3.5% | level 60-60% | mAh err max   1.1 end  +0.4 | in-use trig 4 | on screen: visuals 67% of the brake | worst 30 s net +178 mW
+visuals 850 mW (estimate 500)        net    -1 mW (sd  102) | burn 32.5% jitter  4.0% | level 60-60% | mAh err max   1.2 end  +0.7 | in-use trig 10 | on screen: visuals 80% of the brake | worst 30 s net +307 mW
+split order                          up 0.2 -> vis 0.20; 0.6 -> vis 0.333 cpu 0.267; down 0.45 -> visuals drop first; hidden -> cpu 0.45
+unplug/replug x40                    40 plug changes with junk readings: invariant breaks 0, burn while unplugged 0%, hold 2940.3 -> 2940.3 mAh, level after 60-60% (from 60%)
 hold quality: field charger          drift    +2 mW (±57) -> ∞ (steady) per 1% 
 hold quality: charger too strong (4 W) drift +2087 mW (±56) -> 6 min per 1% charger too strong, brake maxed
 hold quality: charger too weak (0.5 W, phone 2.5 W) drift -2002 mW (±60) -> 6 min per 1% charger too weak, draining
 15 W fast charger                    off at 9, 139, 268, 398, 527 s, burn while off 0%
 5 W surge (field charger)            tripped: false
 15 W + Ignore                        burn after Ignore 80%
-target 60% -> exact mAh              net    -0 mW (sd   71) | burn 58.4% jitter  4.0% | level 60-60% | mAh err max   1.5 end  -0.1 | in-use trig 6 | target 2940.3 mAh (converted once, end 2940.3)
-random use 0.5-2 W, 5-55 s           net    +1 mW (sd  307) | burn 47.2% jitter  9.1% | level 60-60% | mAh err max   3.9 end  +1.0 | in-use trig 53 | back-off to 30% in median 4.5 s (n=38)
-=== Charge Brake v0.5.1 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===
-field: surplus +700 mW, gain 1.2 W   net    +0 mW (sd   67) | burn 58.3% jitter  3.9% | level 60-60% | mAh err max   1.6 end  +0.4 | in-use trig 3
-weak burn gain 0.8 W                 net   -18 mW (sd   68) | burn 64.8% jitter  4.2% | level 60-60% | mAh err max  10.5 end  +0.3 | in-use trig 1
-strong burn gain 3 W                 net    +0 mW (sd  122) | burn 23.3% jitter  3.3% | level 60-60% | mAh err max   1.3 end  +1.0 | in-use trig 11
-surplus +300 mW                      net    -1 mW (sd   64) | burn 25.1% jitter  3.7% | level 60-60% | mAh err max   1.4 end  -0.0 | in-use trig 2
-lag: 2 s sensor period               net    -3 mW (sd  154) | burn 58.6% jitter  9.2% | level 60-60% | mAh err max   2.4 end  +0.3 | in-use trig 24
-start 57.5%, target 60%              net    -1 mW (sd   65) | burn 58.4% jitter  3.7% | level 60-60% | mAh err max   1.3 end  +0.1 | in-use trig 3 | burn below target 0%, reached after 41 min
-=== render brake (Live view on screen) first, then CPU; on screen 10 min / hidden 5 min ===
-render 400 mW (= estimate)           net    -1 mW (sd   67) | burn 54.0% jitter  4.0% | level 60-60% | mAh err max   1.2 end  +0.4 | in-use trig 3 | on screen: render 51% of the brake | worst 30 s net +164 mW
-render 250 mW (estimate 400)         net    -1 mW (sd   66) | burn 62.3% jitter  4.0% | level 60-60% | mAh err max   1.3 end  +0.4 | in-use trig 2 | on screen: render 41% of the brake | worst 30 s net +165 mW
-render 700 mW (estimate 400)         net    -1 mW (sd   96) | burn 38.3% jitter  4.6% | level 60-60% | mAh err max   1.2 end  +0.5 | in-use trig 5 | on screen: render 89% of the brake | worst 30 s net +264 mW
+target 60% -> exact mAh              net    -0 mW (sd   60) | burn 58.4% jitter  3.3% | level 60-60% | mAh err max   1.3 end  +0.0 | in-use trig 5 | target 2940.3 mAh (converted once, end 2940.3)
+random use 0.5-2 W, 5-55 s           net    +1 mW (sd  301) | burn 47.2% jitter  8.2% | level 60-60% | mAh err max   3.9 end  +1.0 | in-use trig 52 | back-off to 30% in median 4.2 s (n=36)
+=== Charge Brake v0.5.2 simulation: field-log noise (±700 mW, 1.8 Hz), 5 W charger with surge; stats after 45 min (surge recovered) ===
+field: surplus +700 mW, gain 1.2 W   net    +1 mW (sd   56) | burn 58.3% jitter  3.1% | level 60-60% | mAh err max   1.4 end  +0.3 | in-use trig 3
+weak burn gain 0.8 W                 net   -17 mW (sd   63) | burn 64.6% jitter  3.3% | level 60-60% | mAh err max  10.4 end  +0.3 | in-use trig 2
+strong burn gain 3 W                 net    +0 mW (sd  104) | burn 23.3% jitter  2.7% | level 60-60% | mAh err max   1.2 end  +0.5 | in-use trig 8
+surplus +300 mW                      net    -2 mW (sd   52) | burn 25.1% jitter  2.9% | level 60-60% | mAh err max   1.3 end  -0.0 | in-use trig 1
+lag: 2 s sensor period               net    -2 mW (sd  132) | burn 58.5% jitter  7.8% | level 60-60% | mAh err max   2.0 end  +0.1 | in-use trig 12
+start 57.5%, target 60%              net    -1 mW (sd   56) | burn 58.5% jitter  3.0% | level 60-60% | mAh err max   1.2 end  +0.1 | in-use trig 2 | burn below target 0%, reached after 41 min
 smoother: max step 0.156 mAh/s, max error 0.54 mAh

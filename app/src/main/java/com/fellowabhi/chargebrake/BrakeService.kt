@@ -26,18 +26,27 @@ class BrakeService : Service() {
         if (now - lastNote >= 1500) { lastNote = now; post() }
     }
 
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+    /** Bubble setting or app visibility changed (any thread): re-check on the main thread. */
+    private val onBubbleChange: () -> Unit = { main.post { if (running) { syncBubble(); lastNote = 0; post() } } }
+
     override fun onBind(i: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> { stopSelf(); return START_NOT_STICKY }
-            ACTION_PAUSE -> { Monitor.setPaused(!Monitor.ctl.paused); lastNote = 0; return START_STICKY }
+            ACTION_PAUSE -> { if (!running) { stopSelf(); return START_NOT_STICKY }; Monitor.setPaused(!Monitor.ctl.paused); lastNote = 0; post(); return START_STICKY }
             ACTION_BUBBLE -> { Monitor.init(this); Monitor.setBubble(!Monitor.bubble); if (running) { syncBubble(); post(); return START_STICKY }; stopSelf(); return START_NOT_STICKY }
             ACTION_SYNC -> { if (running) { syncBubble(); post(); return START_STICKY }; stopSelf(); return START_NOT_STICKY }
         }
         nm.createNotificationChannel(NotificationChannel(CH, "Charge Brake", NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) })
-        if (Build.VERSION.SDK_INT >= 34) startForeground(ID, note(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        else startForeground(ID, note())
+        // Android 14: a sticky restart may not be allowed to go foreground (or Monitor may not be ready yet): stop cleanly instead of crashing
+        Monitor.init(this)
+        val fg = runCatching {
+            if (Build.VERSION.SDK_INT >= 34) startForeground(ID, note(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            else startForeground(ID, note())
+        }
+        if (fg.isFailure) { if (!running) { stopSelf(); return START_NOT_STICKY } }
         if (!running) {
             running = true
             Monitor.acquire(this)
@@ -45,6 +54,7 @@ class BrakeService : Service() {
             wl = (getSystemService(Context.POWER_SERVICE) as PowerManager)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "chargebrake:brake").apply { setReferenceCounted(false); acquire() }
             Monitor.listeners.add(onTick)
+            Monitor.bubbleListeners.add(onBubbleChange)
         }
         syncBubble()
         return START_STICKY
@@ -54,17 +64,19 @@ class BrakeService : Service() {
         if (running) {
             running = false
             Monitor.listeners.remove(onTick)
+            Monitor.bubbleListeners.remove(onBubbleChange)
+            main.removeCallbacksAndMessages(null)
             bubble?.hide(); bubble = null
             Monitor.setEnabled(false)
             Monitor.release()
-            wl?.release(); wl = null
+            runCatching { if (wl?.isHeld == true) wl?.release() }; wl = null
         }
         super.onDestroy()
     }
 
-    /** Show / hide the floating bubble to match the setting (needs the overlay permission). */
+    /** Show / hide the floating bubble to match the setting (needs the overlay permission); hidden while the app is on screen. */
     private fun syncBubble() {
-        val want = Monitor.bubble && android.provider.Settings.canDrawOverlays(this)
+        val want = Monitor.bubble && !Monitor.appVisible && android.provider.Settings.canDrawOverlays(this)
         if (want) { if (bubble == null) bubble = BubbleOverlay(this); bubble?.show() } else { bubble?.hide(); bubble = null }
     }
 
@@ -98,7 +110,7 @@ class BrakeService : Service() {
             .setCategory(Notification.CATEGORY_SERVICE)
             .addAction(Notification.Action.Builder(null, if (c.paused) "Resume" else "Pause", pause).build())
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
-            .addAction(Notification.Action.Builder(null, if (Monitor.bubble && bubble?.shown == true) "Hide bubble" else "Bubble", bubblePi()).build())
+            .addAction(Notification.Action.Builder(null, if (Monitor.bubble) "Hide bubble" else "Bubble", bubblePi()).build())
             .build()
     }
 

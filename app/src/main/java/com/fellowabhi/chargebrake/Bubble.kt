@@ -53,7 +53,37 @@ fun netScale(v: Float): Int {
     return lerpColor(C_GREEN, if (v > 0) C_AMBER else C_BLUE, k)
 }
 fun netFrac(v: Float) = (abs(v) / 2500f).pow(0.6f).coerceAtMost(1f)
-fun fmtNetShort(v: Float): String { val a = abs(v); val s = if (v >= 0) "+" else "−"; return if (a >= 1000) s + String.format(Locale.US, "%.1fk", a / 1000) else s + a.toInt() }
+fun fmtNetShort(v: Float): String { if (!v.isFinite()) return "—"; val a = abs(v); val s = if (v >= 0) "+" else "−"; return if (a >= 1000) s + String.format(Locale.US, "%.1fk", a / 1000) else s + a.toInt() }
+
+/** The bubble's texts (pure, so they can be tested). */
+object BubbleText {
+    fun centre(net: Float) = fmtNetShort(net)
+    fun brake(b: Float) = "B ${(b.coerceIn(0f, 1f) * 100).safeRound()}%"
+    /** Pill line 1: the status word (an icon is drawn before it). */
+    fun status(v: BubbleData, healthy: Boolean) = when {
+        v.paused -> "Paused"
+        healthy -> "Holding"
+        v.st == St.IN_USE -> "In use"
+        else -> Look.word(v.st)
+    }
+    fun statusIcon(v: BubbleData, healthy: Boolean) = when { v.paused -> R.drawable.ic_pause; healthy -> R.drawable.ic_check; else -> Look.uiIcon(v.st) }
+    /** Pill line 2: the target, in mAh (≈%); while charging up / draining with what is left. */
+    fun line2(v: BubbleData): String {
+        val tgt = if (!v.holdMah.isFinite()) "${v.hold}%" else "${fmtInt(v.holdMah)} mAh (≈${v.hold}%)"
+        val go = v.holdMah.isFinite() && v.mah.isFinite()
+        return when (v.st) {
+            St.CHARGING_UP -> "To $tgt" + (if (go) " · ${fmtInt(maxOf(0f, v.holdMah - v.mah))} to go" else "")
+            St.DRAINING -> "To $tgt" + (if (go) " · ~${fmtInt(maxOf(0f, v.mah - v.holdMah))} to go" else "")
+            St.OFF -> "Brake off · ${v.pct}%"
+            else -> "Hold $tgt"
+        }
+    }
+    fun line3(v: BubbleData, brake: Float) =
+        if (v.temp.isFinite()) String.format(Locale.US, "Brake %d%% · %.1f °C", (brake.coerceIn(0f, 1f) * 100).safeRound(), v.temp)
+        else "Brake ${(brake.coerceIn(0f, 1f) * 100).safeRound()}%"
+    fun quality(v: BubbleData): String { val q = v.minPerPct
+        return when { !v.holding -> ""; q.isNaN() -> "measuring"; q.isInfinite() -> "steady"; q >= 60f -> "~${(q / 60f).toInt()} h/1%"; else -> "~${q.toInt()} m/1%" } }
+}
 
 /**
  * Floating bubble: outer ring = net power (option-6 colours, ticks at the ±100 mW holding band),
@@ -80,6 +110,11 @@ class BubbleView(ctx: Context) : View(ctx) {
     private val pTxtN = Paint(Paint.ANTI_ALIAS_FLAG).apply { fontFeatureSettings = "tnum" }
     private val rect = RectF(); private val mtx = Matrix()
     private val path = android.graphics.Path()
+    private val icons = HashMap<Int, android.graphics.drawable.Drawable>()
+    private fun icon(c: Canvas, id: Int, x: Float, y: Float, s: Float, col: Int) {
+        val d = icons.getOrPut(id) { context.getDrawable(id)!!.mutate() }
+        d.setTint(col); d.setBounds((x - s / 2).toInt(), (y - s / 2).toInt(), (x + s / 2).toInt(), (y + s / 2).toInt()); d.draw(c)
+    }
 
     init { setLayerType(LAYER_TYPE_HARDWARE, null) }
 
@@ -214,13 +249,14 @@ class BubbleView(ctx: Context) : View(ctx) {
             c.drawArc(rect, -90f, swB, false, pRing); pRing.shader = null
             headGlow(c, cx, cy, r2, -90f + swB, w2, C_ORANGE, (moveB * 4f).coerceAtMost(1f) * animK * 0.5f + 0.35f * ((brake - 0.75f) / 0.25f).coerceIn(0f, 1f))
         }
-        // centre text
+        // centre: the net number fitted inside the brake ring (3-4 digits stay clear of it), the brake % small below
         val numCol = lerpColor(netCol, Color.WHITE, 0.35f)
-        pTxt.textAlign = Paint.Align.CENTER; pTxt.textSize = D * 0.235f; pTxt.color = numCol
-        c.drawText(fmtNetShort(net), cx, cy + pTxt.textSize * 0.30f, pTxt)
-        pTxtN.textAlign = Paint.Align.CENTER; pTxtN.textSize = 8f; pTxtN.color = 0x8CFFFFFF.toInt()
-        c.drawText(d?.let { "mW · ${it.pct}%" } ?: "mW", cx, cy + R * 0.48f, pTxtN)
-        if (hk > 0.05f) check(c, cx, cy - R * 0.43f, D * 0.10f, withAlpha(C_GREEN, hk), 1.6f)
+        val inner = r2 - w2 / 2 - 2.5f
+        pTxt.color = numCol
+        fit(c, BubbleText.centre(net), cx, cy + D * 0.19f * 0.30f, D * 0.19f, inner * 2f * 0.80f, pTxt, Paint.Align.CENTER)
+        pTxtN.color = withAlpha(lerpColor(C_ORANGE, Color.WHITE, 0.45f), 0.80f)
+        fit(c, BubbleText.brake(brake), cx, cy + inner * 0.62f, 7f, inner * 1.1f, pTxtN, Paint.Align.CENTER)
+        if (hk > 0.05f) icon(c, com.fellowabhi.chargebrake.R.drawable.ic_check, cx, cy - inner * 0.62f, 8f, withAlpha(C_GREEN, hk))
     }
 
     private fun headGlow(c: Canvas, cx: Float, cy: Float, r: Float, deg: Float, w: Float, col: Int, k: Float) {
@@ -232,11 +268,6 @@ class BubbleView(ctx: Context) : View(ctx) {
         c.drawCircle(x, y, rr, pFill); pFill.shader = null
     }
 
-    private fun check(c: Canvas, x: Float, y: Float, s: Float, col: Int, lw: Float) {
-        pLine.color = col; pLine.strokeWidth = lw
-        path.reset(); path.moveTo(x - s * 0.45f, y); path.lineTo(x - s * 0.12f, y + s * 0.32f); path.lineTo(x + s * 0.5f, y - s * 0.36f)
-        c.drawPath(path, pLine)
-    }
 
     /** Draw text left-aligned at x, shrinking it if it would run past maxW. */
     private fun fit(c: Canvas, s: String, x: Float, y: Float, size: Float, maxW: Float, p: Paint, align: Paint.Align = Paint.Align.LEFT) {
@@ -251,32 +282,24 @@ class BubbleView(ctx: Context) : View(ctx) {
         val right = if (mirror) left + pw - D - 8f else left + pw - 14f
         val tw = right - tx
         val al = (a * 255).toInt()
-        // line 1: net + state
+        // line 1: icon + status (the net is already in the bubble); thin close (x) in the far top corner
         val healthy = hk > 0.5f
-        val stTxt = when { healthy -> "Holding ✓"; v.paused -> "Paused"; else -> when (v.st) {
-            St.BRAKING -> "Braking"; St.HOLDING, St.IDLE -> "Holding"; St.IN_USE -> "In use"; St.CHARGING_UP -> "Charging up"; St.DRAINING -> "Draining"
-            St.HOT -> "Too hot"; St.FAST -> "Fast charger"; St.NO_READING -> "No reading"; St.UNPLUGGED -> "Unplugged"; else -> "Off" } }
-        pTxt.color = lerpColor(netCol, Color.WHITE, 0.35f); pTxt.alpha = al
-        val l1 = "${fmtNetShort(net)} mW"
-        fit(c, l1, tx, cy - R * 0.36f, 13f, tw * 0.55f, pTxt)
-        pTxt.color = if (healthy) C_GREEN else stCol; pTxt.alpha = al
-        fit(c, stTxt, right, cy - R * 0.36f, 10f, tw * 0.45f, pTxt, Paint.Align.RIGHT)
-        // line 2: the target, in % and mAh; while charging up / draining as "54% → 56%"
-        val tgt = if (v.holdMah.isNaN()) "${v.hold}%" else "${fmtInt(v.holdMah)} mAh (≈${v.hold}%)"
-        val go = !v.holdMah.isNaN() && !v.mah.isNaN()
-        val l2 = when (v.st) {
-            St.CHARGING_UP -> "→ $tgt" + (if (go) " · ${fmtInt(maxOf(0f, v.holdMah - v.mah))} to go" else "")
-            St.DRAINING -> "→ $tgt" + (if (go) " · ~${fmtInt(maxOf(0f, v.mah - v.holdMah))} to go" else "")
-            St.OFF -> "Brake off · ${v.pct}%"
-            else -> "Hold $tgt"
-        }
+        val col1 = if (healthy) C_GREEN else stCol
+        val l1 = if (mirror) tx + 14f else tx          // docked right: the close sits at the left end
+        icon(c, BubbleText.statusIcon(v, healthy), l1 + 6f, cy - R * 0.36f - 4f, 12f, withAlpha(col1, a))
+        pTxt.color = col1; pTxt.alpha = al
+        fit(c, BubbleText.status(v, healthy), l1 + 16f, cy - R * 0.36f, 12f, tw - 32f, pTxt)
+        val (xx, xy) = closeAt(left, pw)
+        icon(c, com.fellowabhi.chargebrake.R.drawable.ic_close, xx, xy, 9f, withAlpha(Color.WHITE, 0.55f * a))
+        // line 2: the target
+        val l2 = BubbleText.line2(v)
         pTxtN.color = 0xD9FFFFFF.toInt(); pTxtN.alpha = (0.85f * al).toInt()
         fit(c, l2, tx, cy + 1.5f, 10f, tw, pTxtN)
         // line 3: brake + temperature, hold quality on the right
         val q = v.minPerPct
-        val qTxt = when { !v.holding -> ""; q.isNaN() -> "measuring"; q.isInfinite() -> "steady"; q >= 60f -> "~${(q / 60f).toInt()} h/1%"; else -> "~${q.toInt()} m/1%" }
+        val qTxt = BubbleText.quality(v)
         pTxtN.color = 0x9EFFFFFF.toInt(); pTxtN.alpha = (0.62f * al).toInt()
-        fit(c, String.format(Locale.US, "Brake %d%% · %.1f °C", (brake * 100).toInt(), v.temp), tx, cy + R * 0.40f, 9.5f, tw * 0.66f, pTxtN)
+        fit(c, BubbleText.line3(v, brake), tx, cy + R * 0.40f, 9.5f, tw * 0.66f, pTxtN)
         if (qTxt.isNotEmpty()) {
             fit(c, qTxt, right, cy + R * 0.40f, 9f, tw * 0.32f, pTxtN, Paint.Align.RIGHT)
             pFill.color = Quality.color(q); pFill.alpha = al
@@ -290,6 +313,17 @@ class BubbleView(ctx: Context) : View(ctx) {
             for (i in 0 until sparkN) { val px = tx + i / (spark.size - 1f) * tw; val py = sy - (spark[i] / 1500f).coerceIn(-1f, 1f) * sh; if (i == 0) path.moveTo(px, py) else path.lineTo(px, py) }
             pLine.strokeWidth = 1.3f; pLine.color = netCol; pLine.alpha = (230 * a).toInt(); c.drawPath(path, pLine)
         }
+    }
+
+    /** Close (x) centre in dp: the top corner at the far end of the pill (top right when docked left). */
+    private fun closeAt(left: Float, pw: Float) = (if (mirror) left + 13f else left + pw - 13f) to (M + 11f)
+    /** Is (x, y) in px on the close (x) of the expanded pill? Generous 22 dp target. */
+    fun onClose(x: Float, y: Float): Boolean {
+        if (!expanded || morph < 0.9f) return false
+        val pw = PW; val wTot = width / dn
+        val left = if (mirror) wTot - M - pw else M
+        val (cx, cy) = closeAt(left, pw)
+        return hypot(x / dn - cx, y / dn - cy) <= 11f
     }
 
     /** Is (x, y) in px on the round bubble part (vs. the pill text)? */
@@ -403,6 +437,9 @@ class BubbleOverlay(private val ctx: Context) {
                         yFrac = (p.y.toFloat() / sh).coerceIn(0f, 1f)
                         prefs.edit().putBoolean("bRight", right).putFloat("bY", yFrac).apply()
                         place(animate = true)
+                    } else if (bv.onClose(e.x, e.y)) {
+                        bv.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                        Monitor.setBubble(false)            // turn it on again from the notification or the app
                     } else if (bv.expanded && !bv.onBubble(e.x, e.y)) openApp()
                     else {
                         val ex = !bv.expanded

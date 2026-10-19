@@ -24,20 +24,21 @@ import kotlin.math.exp
 import kotlin.math.roundToInt
 
 class MainActivity : Activity(), Choreographer.FrameCallback {
-    companion object { const val EXTRA_BUBBLE = "bubble"; const val ECO_MS = 333L }
+    companion object {
+        const val EXTRA_BUBBLE = "bubble"
+        const val MIN_FPS = 3f            // visual level 0: ~3 fps, no glows, no pulses, simple graph
+        const val TOUCH_LEVEL = 0.45f     // while touching / scrolling (2.5 s): smooth enough to use
+    }
     // views (rebuilt on fold/unfold)
     private lateinit var root: ScrollView
     private lateinit var frameV: android.widget.FrameLayout
     private lateinit var load: RenderLoad
-    private var maxModeId = -1; private var hiRefresh = false
-    private lateinit var num: TextView
-    private lateinit var raw: TextView
-    private lateinit var useLine: TextView
-    private lateinit var banner: GlowFrame
-    private lateinit var bIcon: TextView
-    private lateinit var bTitle: TextView
-    private lateinit var bSub: TextView
-    private lateinit var bAction: TextView
+    private var maxModeId = -1; private var lowModeId = -1; private var maxHz = 60f; private var refreshWant = 0
+    private lateinit var mainCard: GlowFrame
+    private lateinit var big: BigNumber
+    private lateinit var table: RawTable
+    private lateinit var bnr: BannerViews
+    private lateinit var visMeter: VisualMeter
     private lateinit var batV: TextView; private lateinit var batS: TextView; private lateinit var batSrc: TextView
     private lateinit var brkTile: GlowFrame; private lateinit var brkV: TextView; private lateinit var brkBar: BarView; private lateinit var brkS: TextView
     private lateinit var surV: TextView; private lateinit var surS: TextView
@@ -49,31 +50,22 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var pill: PillSwitch
     private lateinit var targetRow: FlowRow
     private lateinit var bubPill: PillSwitch; private lateinit var bubSub: TextView
-    private val modeTags = ArrayList<TextView>()
     private var pendingBubble = false
-    private val ecoH = android.os.Handler(android.os.Looper.getMainLooper())
-    private var lastEco = 0L
-    private val ecoTick = object : Runnable {
-        override fun run() {
-            if (!running || Monitor.live) return
-            ecoH.postDelayed(this, ECO_MS)
-            val now = android.os.SystemClock.uptimeMillis()
-            val dt = if (lastEco == 0L) ECO_MS / 1000f else ((now - lastEco) / 1000f).coerceIn(0.05f, 1f)
-            lastEco = now
-            frame(dt)
-        }
-    }
-    private val dots = ArrayList<View>()
+    private val tickH = android.os.Handler(android.os.Looper.getMainLooper())
+    private val slowTick = Runnable { scheduled = false; onTick(android.os.SystemClock.uptimeMillis() * 1_000_000L) }
+    private var scheduled = false
     private var wide = false
-    private var unitView: TextView? = null
+    private var lastTouch = 0L
 
     // eased display values (survive rebuilds)
     private var dNum = 0f; private var dNumCol = C_GREEN; private var dGlow = C_GREY
     private var dBurn = 0f; private var dTemp = 0f; private var dSur = 0f; private var dUse = Float.NaN
+    private var dLevel = Monitor.IDLE_LEVEL
     private var lastNs = 0L; private var running = false
     private var bgColor = 0; private var keepOn = false
     private var targetKey = ""
     private var lastH = 0
+    private var level = 0f; private var fps = 0f
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -105,23 +97,38 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             .onFailure { pendingBubble = false }
     }
 
-    /** Eco (default): ~3 Hz updates, no glow/pulse loops, normal screen timeout. Live: every frame, screen on while plugged. */
-    private fun startLoop() {
-        Choreographer.getInstance().removeFrameCallback(this); ecoH.removeCallbacks(ecoTick)
-        Monitor.uiMode = if (Monitor.live) Monitor.UI_LIVE else Monitor.UI_ECO
-        lastNs = 0; lastEco = 0
-        if (Monitor.live) Choreographer.getInstance().postFrameCallback(this) else ecoH.post(ecoTick)
+    /**
+     * One adaptive mode: the screen updates at a rate set by the visual level (part of the brake): ~3 fps at 0
+     * (handler ticks), up to the display max at 1 (vsync). Touching boosts it briefly so the app stays usable.
+     */
+    private fun schedule() {
+        if (!running || scheduled) return
+        scheduled = true
+        if (fps >= 20f) Choreographer.getInstance().postFrameCallback(this)
+        else tickH.postDelayed(slowTick, (1000f / fps.coerceAtLeast(MIN_FPS)).toLong())
+    }
+    private fun unschedule() { Choreographer.getInstance().removeFrameCallback(this); tickH.removeCallbacks(slowTick); scheduled = false }
+    /** Re-plan now (a touch, or a big level change): don't wait out a slow tick. */
+    private fun kick() { unschedule(); lastNs = 0; schedule() }
+
+    override fun dispatchTouchEvent(e: android.view.MotionEvent): Boolean {
+        val boost = android.os.SystemClock.uptimeMillis() - lastTouch > 2500
+        lastTouch = android.os.SystemClock.uptimeMillis()
+        if (boost && fps < 20f) { fps = 30f; kick() }
+        return super.dispatchTouchEvent(e)
     }
 
     override fun onConfigurationChanged(c: Configuration) { super.onConfigurationChanged(c); rebuild() }
 
-    override fun onStart() { super.onStart(); Monitor.acquire(this); running = true; startLoop() }
-    override fun onStop() { applyRefresh(0f); running = false; Monitor.uiMode = Monitor.UI_NONE; Choreographer.getInstance().removeFrameCallback(this); ecoH.removeCallbacks(ecoTick); Monitor.release(); setKeepOn(false); super.onStop() }
+    override fun onStart() { super.onStart(); Monitor.acquire(this); Monitor.setAppVisible(true); running = true; lastNs = 0; fps = 10f; schedule() }
+    override fun onStop() {
+        running = false; unschedule(); applyRefresh(-1f); Monitor.setAppVisible(false); Monitor.release(); setKeepOn(false); super.onStop()
+    }
 
     private fun rebuild() {
         val cfg = resources.configuration
         wide = cfg.screenWidthDp >= 600
-        dots.clear(); modeTags.clear(); bgColor = 0; targetKey = ""; lastH = 0
+        bgColor = 0; targetKey = ""; lastH = 0
         val content = if (wide) buildInner() else buildCover()
         root = ScrollView(this).apply { fitsSystemWindows = true; isFillViewport = true; isVerticalScrollBarEnabled = false; addView(content) }
         load = RenderLoad(this)
@@ -132,16 +139,18 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setContentView(frameV)
     }
 
-    /** Render brake: highest refresh rate while it is in use (hysteresis), default otherwise. */
+    /** Display refresh follows the visual level: lowest mode when low, the max mode when high (hysteresis), default when gone. */
     private fun applyRefresh(v: Float) {
-        val want = if (hiRefresh) v > 0.02f else v > 0.06f
-        if (want == hiRefresh) return
-        hiRefresh = want
-        if (maxModeId < 0) maxModeId = runCatching {
+        if (maxModeId < 0) runCatching {
             @Suppress("DEPRECATION") val d = windowManager.defaultDisplay; val cur = d.mode
-            d.supportedModes.filter { it.physicalWidth == cur.physicalWidth && it.physicalHeight == cur.physicalHeight }.maxByOrNull { it.refreshRate }?.modeId ?: 0
-        }.getOrDefault(0)
-        window.attributes = window.attributes.apply { preferredDisplayModeId = if (want) maxModeId else 0 }
+            val same = d.supportedModes.filter { it.physicalWidth == cur.physicalWidth && it.physicalHeight == cur.physicalHeight }
+            same.maxByOrNull { it.refreshRate }?.let { maxModeId = it.modeId; maxHz = it.refreshRate }
+            lowModeId = same.minByOrNull { it.refreshRate }?.modeId ?: 0
+        }.onFailure { maxModeId = 0; lowModeId = 0 }
+        val want = when { v < 0f -> 0; v >= 0.7f -> 2; v <= 0.45f -> 1; else -> refreshWant.coerceAtLeast(1) }
+        if (want == refreshWant) return
+        refreshWant = want
+        window.attributes = window.attributes.apply { preferredDisplayModeId = when (want) { 2 -> maxModeId; 1 -> lowModeId; else -> 0 } }
     }
 
     /** Main graph ≈ 50 % of the viewport height (never below a readable minimum); the charge graph takes the rest. */
@@ -160,69 +169,33 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun setH(v: View, h: Int) { val lp = v.layoutParams ?: return; if (lp.height != h) { lp.height = h; v.layoutParams = lp } }
 
     // ---------- pieces ----------
-    /** Eco / Live view toggle (tap). Live = smooth every-frame updates and the screen stays on while plugged. */
-    private fun liveTag(): View {
-        val lbl = text(11f, 0xFFFF6B6B.toInt(), bold = true, txt = "LIVE")
-        val r = row(PulseDot(this).also { dots += it }, lbl, gap = 4)
-        r.getChildAt(0).layoutParams = LinearLayout.LayoutParams(dp(10), dp(10))
-        r.setPadding(dp(8), dp(4), dp(9), dp(4))
-        r.setOnClickListener { Monitor.setLive(!Monitor.live); updMode(); startLoop() }
-        modeTags += lbl
-        return r
-    }
-    private fun updMode() {
-        val live = Monitor.live
-        modeTags.forEach { t ->
-            t.text = if (live) "LIVE" else "ECO · tap for live"
-            t.setTextColor(if (live) 0xFFFF6B6B.toInt() else C_DIM)
-            (t.parent as? View)?.background = round(0, dpf(99f), if (live) 0x66FF6B6B else C_LINE, dp(1))
-        }
-        dots.forEach { (it as? PulseDot)?.apply { animate = live; color = if (live) 0xFFFF4D4D.toInt() else C_FAINT; invalidate() } }
-        if (::chart.isInitialized) { chart.animate = live; charge.animate = live }
-    }
-
     private fun titleRow(): View {
         val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(4), 0, dp(4), 0) }
         r.addView(text(13f, C_DIM, txt = "CHARGE BRAKE").apply { letterSpacing = 0.12f }, LinearLayout.LayoutParams(0, -2, 1f))
-        r.addView(text(11f, C_FAINT, txt = "v${Monitor.VERSION}   "))
-        r.addView(liveTag())
+        r.addView(text(11f, C_FAINT, txt = "v${Monitor.VERSION}"), LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(10) })
+        visMeter = VisualMeter(this).apply { setOnClickListener { startActivity(Intent(this@MainActivity, DetailsActivity::class.java)) } }
+        r.addView(visMeter)
         return r
     }
 
-    private fun hero(big: Float): View {
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(4), 0, dp(4), 0) }
-        col.add(text(13f, C_DIM, txt = "Net into battery · 1.5 s average"))
-        num = text(big, C_GREEN, bold = true, txt = "+0").apply {
-            maxLines = 1; gravity = Gravity.END
-            minWidth = paint.measureText("+8,888").toInt() + 1        // fixed width: the unit doesn't move as the number changes
-        }
-        val unit = text(big * 0.46f, C_GREEN, bold = true, txt = " mW").apply { maxLines = 1 }
-        val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM }
-        r.addView(num); r.addView(unit, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(6) })
-        unitView = unit
-        col.add(r, dp(2))
-        raw = text(12f, C_DIM); col.add(raw, dp(2))
-        useLine = text(12f, C_DIM); col.add(useLine, dp(2))
-        return col
+    /** Main value card: thin state-coloured ring; big net number with a small fixed-width table of raw values beside it. */
+    private fun hero(big0: Float): View {
+        mainCard = GlowFrame(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; pad(dp(10), dp(8), dp(10), dp(8)) }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.add(text(11.5f, C_DIM, txt = "Net into battery · 1.5 s avg"))
+        big = BigNumber(this, big0); col.add(big, dp(4))
+        mainCard.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+        table = RawTable(this, listOf("raw", "current", "voltage", "sensor", "phone use", "charger"), "−18,888 mW")
+        mainCard.addView(table, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(10) })
+        return mainCard
     }
 
     private fun bannerView(): View {
-        banner = GlowFrame(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; pad(dp(12), dp(10), dp(12), dp(10)) }
-        bIcon = text(17f, C_ORANGE, bold = true, txt = "×").apply { gravity = Gravity.CENTER }
-        banner.addView(bIcon, LinearLayout.LayoutParams(dp(32), dp(32)))
-        val t = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        bTitle = text(16f, C_ORANGE, bold = true)
-        bSub = text(12.5f, 0xFFD9DCE1.toInt())
-        t.add(bTitle); t.add(bSub, dp(3))
-        banner.addView(t, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(12) })
-        bAction = text(15f, 0xFF1A0E08.toInt(), bold = true, txt = "Start").apply {
-            gravity = Gravity.CENTER; setPadding(0, 0, 0, 0); maxLines = 1
-            setOnClickListener {
-                when (Look.action(Monitor.state)) { "Start" -> BrakeService.start(this@MainActivity); "Resume" -> Monitor.setPaused(false); "Ignore" -> Monitor.ignoreFast() }
-            }
+        bnr = BannerViews(this)
+        bnr.action.setOnClickListener {
+            when (Look.action(Monitor.state)) { "Start" -> BrakeService.start(this@MainActivity); "Resume" -> Monitor.setPaused(false); "Ignore" -> Monitor.ignoreFast() }
         }
-        banner.addView(bAction, LinearLayout.LayoutParams(dp(62), dp(62)).apply { leftMargin = dp(10) })   // round, compact
-        return banner
+        return bnr.root
     }
 
     /** Hold-current / Target chips plus a − / + stepper for the target. */
@@ -238,26 +211,26 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         targetKey = key
         targetRow.removeAllViews()
         // locked value while the brake is on; tapping it (again) re-locks at the current level
-        val lbl = if (m.enabled && cfg.holdCurrent) "Hold ${m.mahLabel(m.ctl.holdMah)}  ↻"
+        val lbl = if (m.enabled && cfg.holdCurrent) "Hold ${m.mahLabel(m.ctl.holdMah)}"
             else "Hold current (" + (if (m.mah.isNaN()) "${m.pct}%" else "${fmtInt(m.mah)} mAh") + ")"
         targetRow.addView(chip(lbl, cfg.holdCurrent) {
             if (Monitor.enabled) Monitor.relockHold() else if (!cfg.holdCurrent) { cfg.holdCurrent = true; Monitor.changed("hold_mode", "current") }
             targetKey = ""
-        })
+        }.apply { if (m.enabled && cfg.holdCurrent) iconEnd(this, R.drawable.ic_refresh, 0xFF7FE3EE.toInt()) })
         val step = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             background = if (!cfg.holdCurrent) round(0xFF123A40.toInt(), dpf(99f), 0xFF1F6E77.toInt(), dp(1)) else round(0, dpf(99f), C_LINE, dp(1)) }
-        fun btn(s: String, d: Int) = text(18f, C_TXT, bold = true, txt = s).apply {
-            gravity = Gravity.CENTER; setPadding(dp(14), dp(4), dp(14), dp(6))
+        fun btn(res: Int, d: Int) = android.widget.ImageView(this).apply {
+            setImageResource(res); setColorFilter(C_TXT); setPadding(dp(10), dp(9), dp(10), dp(9))
             setOnClickListener { setTarget(d) }
         }
-        step.addView(btn("−", -1))
+        step.addView(btn(R.drawable.ic_minus, -1), LinearLayout.LayoutParams(dp(36), dp(34)))
         val tTxt = if (m.targetByMah && !cfg.targetMahSet.isNaN()) "Target ${fmtInt(cfg.targetMahSet)} mAh"
             else if (!cfg.holdCurrent && !cfg.targetMahSet.isNaN()) "Target ${cfg.targetPct}% · ${fmtInt(cfg.targetMahSet)} mAh" else "Target ${cfg.targetPct}%"
         step.addView(text(13f, if (!cfg.holdCurrent) 0xFF7FE3EE.toInt() else C_DIM, txt = tTxt).apply {
             setPadding(dp(4), dp(7), dp(4), dp(7))
             setOnClickListener { if (cfg.holdCurrent) { cfg.holdCurrent = false; Monitor.changed("hold_mode", "target", true); targetKey = "" } }
         })
-        step.addView(btn("+", +1))
+        step.addView(btn(R.drawable.ic_plus, +1), LinearLayout.LayoutParams(dp(36), dp(34)))
         targetRow.addView(step)
     }
     /** Stepper: ±1 % (converted once to mAh) or ±10 mAh when the target is entered in mAh. */
@@ -349,7 +322,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun graphCard(explain: Boolean): GlowFrame {
         gCard = GlowFrame(this).apply { pad(dp(10), dp(10), dp(10), dp(6)) }
         gTitle = text(14f, C_TXT, bold = true, txt = "Power · last ${Monitor.spanLabel()}")
-        gCard.add(cardHead(gTitle, liveTag()))
+        gCard.add(cardHead(gTitle, android.widget.Space(this)))
         val leg = FlowRow(this, dp(12), dp(4))
         listOf(legendItem(0xFFFFFFFF.toInt(), "net mW, 1.5 s avg (left)", 0), legendItem(0x66FFFFFF, "raw", 0),
             legendItem(0, "brake % (right)", 1), legendItem(0, "net-zero band ±100 mW (when holding)", 2)).forEach { leg.addView(it) }
@@ -379,7 +352,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         brakeCard = GlowFrame(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; pad(dp(14), dp(9), dp(14), dp(9)) }
         val t = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         brakeTitle = text(17f, C_TXT, bold = true, txt = "Brake OFF")
-        screenOn = text(12f, C_GREEN, txt = "☀ Screen stays on while plugged")
+        screenOn = text(12f, C_GREEN, txt = "Screen stays on while plugged").apply { iconStart(this, R.drawable.ic_sun, C_GREEN) }
         t.add(brakeTitle); t.add(screenOn, dp(3))
         brakeCard.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
         pill = PillSwitch(this); brakeCard.addView(pill, LinearLayout.LayoutParams(dp(60), dp(34)).apply { leftMargin = dp(8) })
@@ -388,7 +361,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val det = GlowFrame(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; pad(dp(14), dp(9), dp(14), dp(9)) }
         det.addView(text(14f, C_TXT, txt = "Details"), LinearLayout.LayoutParams(-2, -2))
         det.addView(text(13f, C_DIM, txt = " · settings, sensor, log"), LinearLayout.LayoutParams(0, -2, 1f))
-        det.addView(text(14f, C_DIM, txt = "›"))
+        det.addView(android.widget.ImageView(this).apply { setImageResource(R.drawable.ic_chevron); setColorFilter(C_DIM) }, LinearLayout.LayoutParams(dp(18), dp(18)))
         det.setOnClickListener { startActivity(Intent(this, DetailsActivity::class.java)) }
         col.add(det)
         val bub = GlowFrame(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; pad(dp(14), dp(8), dp(14), dp(8)) }
@@ -406,10 +379,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun buildCover(): View {
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(11), dp(6), dp(11), dp(16)) }
         val w = resources.configuration.screenWidthDp
-        col.add(titleRow()); col.add(hero((w / 7.2f).coerceIn(34f, 50f)), dp(6)); col.add(bannerView(), dp(4))
+        col.add(titleRow()); col.add(hero((w / 8.2f).coerceIn(30f, 46f)), dp(6)); col.add(bannerView(), dp(2))
         col.add(targetControls(), dp(2)); col.add(tilesGrid(22f), dp(4))
         col.add(graphCard(false), 0, dp(260)); col.add(chargeCard(), 0, dp(200)); col.add(controls())
-        updTarget(); updMode()
+        updTarget()
         return col
     }
 
@@ -423,11 +396,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         top.addView(left, LinearLayout.LayoutParams(0, -2, 62f))
         val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val panelW = (w - 26) * 0.38f
-        panel.add(hero((panelW / 5.8f).coerceIn(34f, 54f)), dp(4)); panel.add(bannerView(), dp(6))
+        panel.add(hero((panelW / 7.4f).coerceIn(30f, 50f)), dp(4)); panel.add(bannerView(), dp(2))
         panel.add(targetControls(), dp(2)); panel.add(tilesGrid(24f), dp(4)); panel.add(controls())
         top.addView(panel, LinearLayout.LayoutParams(0, -2, 38f).apply { leftMargin = dp(4) })
         rootL.add(top, dp(4))
-        updTarget(); updMode()
+        updTarget()
         return rootL
     }
 
@@ -467,6 +440,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun maybeSnap() {
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastSnap < 10_000) return
+        if ((0 until targetRow.childCount).any { targetRow.getChildAt(it).width == 0 }) return   // chips just rebuilt: wait for their layout
         lastSnap = now
         if (!java.io.File(cacheDir, "snap").exists() || root.width == 0) return
         runCatching {
@@ -475,15 +449,32 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             fun save(v: View, w: Int, h: Int, name: String) {
                 val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
                 val cv = android.graphics.Canvas(bmp); cv.drawColor(C_BG); frameV.background?.let { it.setBounds(0, 0, w, h); it.draw(cv) } ?: cv.drawColor(C_BG)
+                if (load.level > 0.01f) { load.draw(cv) }
                 v.draw(cv)
-                java.io.FileOutputStream(java.io.File(dir, name)).use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                java.io.FileOutputStream(java.io.File(dir, "$name.tmp")).use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                java.io.File(dir, "$name.tmp").renameTo(java.io.File(dir, name))
             }
             val tag = "${resources.configuration.screenWidthDp}x${resources.configuration.screenHeightDp}"
             save(c, c.width, maxOf(c.height, root.height), "snap-$tag-full.png")
+            val sb = StringBuilder()
+            fun dump(v: View, d: Int) { sb.append("  ".repeat(d)).append(v.javaClass.simpleName).append(' ').append("${v.left},${v.top} ${v.width}x${v.height} vis=${v.visibility} a=${v.alpha}")
+                if (v is TextView) sb.append(" '").append(v.text.take(30)).append('\'')
+                sb.append('\n'); if (v is android.view.ViewGroup) for (i in 0 until v.childCount) dump(v.getChildAt(i), d + 1) }
+            dump(root, 0); java.io.File(dir, "tree-$tag.txt").writeText(sb.toString())
+            // every banner state at cover / inner / narrow widths (real values for the numbers)
+            for (wDp in intArrayOf(338, 317, 280)) {
+                val states = St.values()
+                val views = states.map { st -> BannerViews(this).also { it.bind(st, Monitor, Look.color(st), 0.5f, 1f) } }
+                val w = dp(wDp); var hTot = 0
+                for (bv in views) { bv.root.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)); hTot += bv.root.measuredHeight }
+                val bmp = android.graphics.Bitmap.createBitmap(w, hTot, android.graphics.Bitmap.Config.ARGB_8888)
+                val cv = android.graphics.Canvas(bmp); cv.drawColor(C_BG)
+                for (bv in views) { bv.root.layout(0, 0, w, bv.root.measuredHeight); bv.root.draw(cv); cv.translate(0f, bv.root.measuredHeight.toFloat()) }
+                java.io.FileOutputStream(java.io.File(dir, "banners-${wDp}dp.png")).use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            }
             // the floating bubble, rendered offscreen with its real drawing code: live data + fixed examples
             fun bub(name: String, data: BubbleData, exp: Boolean, mirror: Boolean = false) {
                 val bv = BubbleView(this); bv.setExpanded(exp, animate = false); bv.mirror = mirror
-                // a short history for the sparkline
                 for (k in 0 until 30) bv.push(data.copy(net = data.net + 60f * kotlin.math.sin(k * 0.7f)), animate = false)
                 bv.push(data, animate = false)
                 val w = bv.wantW().toInt(); val h = bv.wantH().toInt()
@@ -499,22 +490,36 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             bub("bub-brake-small.png", hold.copy(net = 1450f, brake = 0.97f, st = St.BRAKING, minPerPct = 22f), false)
             bub("bub-brake-exp.png", hold.copy(net = 1450f, brake = 0.97f, st = St.BRAKING, minPerPct = 22f), true, mirror = true)
             bub("bub-up-exp.png", BubbleData(2350f, 0f, St.CHARGING_UP, 54, 56, 2722f, 2625f, 35.4f, Float.NaN, false), true)
-            bub("bub-drain-small.png", BubbleData(-420f, 0.95f, St.DRAINING, 61, 60, 2916f, 2958f, 39.1f, Float.NaN, false), false)
+            bub("bub-up-small.png", BubbleData(4350f, 0f, St.CHARGING_UP, 54, 56, 2722f, 2625f, 35.4f, Float.NaN, false), false)
+            bub("bub-drain-small.png", BubbleData(-420f, 0.38f, St.DRAINING, 61, 60, 2916f, 2958f, 39.1f, Float.NaN, false), false)
+            bub("bub-drain-exp.png", BubbleData(-420f, 0.38f, St.DRAINING, 61, 60, 2916f, 2958f, 39.1f, Float.NaN, false), true)
+            bub("bub-wide-small.png", hold.copy(net = -888f, brake = 0.12f, st = St.IN_USE), false)
         }
     }
 
-    // ---------- per-frame animation ----------
-    override fun doFrame(ns: Long) {
-        if (!running || !Monitor.live) return
-        Choreographer.getInstance().postFrameCallback(this)
-        val dt = if (lastNs == 0L) 0.016f else ((ns - lastNs) / 1e9f).coerceIn(0.001f, 0.1f)
+    // ---------- adaptive frame loop ----------
+    override fun doFrame(ns: Long) { scheduled = false; onTick(ns) }
+
+    private fun onTick(ns: Long) {
+        if (!running) return
+        val minGap = (1e9f / fps.coerceAtLeast(MIN_FPS) - 4e6f).toLong()
+        if (lastNs != 0L && ns - lastNs < minGap && fps >= 20f) { schedule(); return }   // vsync faster than the wanted rate: skip
+        val dt = if (lastNs == 0L) 0.05f else ((ns - lastNs) / 1e9f).coerceIn(0.001f, 0.5f)
         lastNs = ns
         frame(dt)
+        schedule()
     }
 
     private fun frame(dt: Float) {
-        val live = Monitor.live
         val m = Monitor; val c = m.ctl; val st = m.state
+        // visual level: what the brake asks for (or the idle level), raised briefly while touching
+        val touching = android.os.SystemClock.uptimeMillis() - lastTouch < 2500
+        val want = maxOf(m.visLevel, if (touching) TOUCH_LEVEL else 0f)
+        dLevel += (want - dLevel) * (1f - exp(-dt / 0.4f))
+        level = dLevel.coerceIn(0f, 1f)
+        fps = MIN_FPS + (maxHz - MIN_FPS) * level
+        val glowK = ((level - 0.15f) / 0.3f).coerceIn(0f, 1f)          // glows / pulses fade in from 15 % to 45 %
+        val anim = level > 0.3f
         val k = 1f - exp(-dt / 0.25f); val k2 = 1f - exp(-dt / 0.6f)
         dGlow = lerpColor(dGlow, Look.color(st), k2)
         dNum += (m.avgMw - dNum) * k
@@ -523,44 +528,32 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         dTemp += (m.temp - dTemp) * k
         val sur = m.avgMw + m.burnMw; dSur += (sur - dSur) * k * 0.6f
         val pu = m.phoneUse.let { if (it.isNaN()) it else it.coerceAtLeast(0f) }; dUse = if (pu.isNaN()) Float.NaN else if (dUse.isNaN()) pu else dUse + (pu - dUse) * k * 0.5f
+        val pulse = if (!anim) 0.5f else 0.5f + 0.5f * kotlin.math.sin(System.nanoTime() / 1e9 * 2 * Math.PI).toFloat()
 
-        num.text = fmtSigned(dNum); num.setTextColor(dNumCol); num.setShadowLayer(dpf(if (live) 16f else 10f), 0f, 0f, withAlpha(dNumCol, if (live) 0.55f else 0.35f))
-        unitView?.setTextColor(dNumCol)
-        raw.text = String.format(Locale.US, "raw %s mW · %s mA · %.3f V · %.1f Hz", fmtSigned(m.mW), fmtSigned(m.mA), m.volt, m.rateHz)
-        useLine.text = when {
-            !dUse.isNaN() && m.plugged == 0 -> "Phone use (est.) ~${fmtInt(dUse)} mW · on battery"
-            !dUse.isNaN() -> "Phone use (est.) ~${fmtInt(dUse)} mW · charger ~${fmtInt(m.chargerEst)} mW (est.)"
-            else -> "Phone use (est.): unplug once to calibrate"
-        }
+        // main value card
+        big.text = fmtSigned(dNum); big.color = dNumCol; big.glow = dpf(12f) * glowK; big.invalidate()
+        mainCard.glowColor = dNumCol; mainCard.glow = 0.45f * glowK; mainCard.stroke = 1.3f; mainCard.tint = 0.5f; mainCard.invalidate()
+        table.set(0, fmtSigned(m.mW) + " mW"); table.set(1, fmtSigned(m.mA) + " mA")
+        table.set(2, String.format(Locale.US, "%.3f V", m.volt)); table.set(3, String.format(Locale.US, "%.1f Hz", m.rateHz))
+        table.set(4, if (dUse.isNaN()) "unplug once" else "~" + fmtInt(dUse) + " mW")
+        table.set(5, if (m.plugged == 0) "on battery" else if (m.chargerEst.isNaN()) "—" else "~" + fmtInt(m.chargerEst) + " mW")
 
-        bTitle.text = Look.title(st, m); bSub.text = Look.sub(st, m); bIcon.text = Look.glyph(st)
-        bTitle.setTextColor(dGlow); bTitle.setShadowLayer(dpf(8f), 0f, 0f, withAlpha(dGlow, 0.6f)); bIcon.setTextColor(dGlow)
-        val pulse = if (!live) 0.5f else 0.5f + 0.5f * kotlin.math.sin(System.nanoTime() / 1e9 * 2 * Math.PI).toFloat()
-        bIcon.background = round(withAlpha(dGlow, 0.14f + 0.12f * pulse), dpf(16f))
-        val act = Look.action(st)
-        if (act == null) bAction.visibility = View.GONE else {
-            bAction.visibility = View.VISIBLE
-            if (bAction.text != act) bAction.text = act
-            val bc = if (act == "Ignore") C_GREY else C_ORANGE
-            bAction.textSize = if (act.length > 5) 12.5f else 15f
-            bAction.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(lerpColor(bc, 0xFFFFFFFF.toInt(), 0.10f * pulse)) }
-        }
-        // render brake (Live only): drifting glow layers + max refresh rate + stronger glows
-        val vis = if (live) m.visLevel else 0f
-        load.color = dGlow; if (vis > 0.005f || load.level > 0f) { load.level = vis; load.invalidate() }
-        applyRefresh(vis)
-        val boost = 1f + 0.6f * vis
-        banner.glowColor = dGlow; banner.glow = (0.7f + 0.3f * pulse) * boost; banner.tint = 1.4f; banner.stroke = 1f; banner.invalidate()
+        bnr.bind(st, m, dGlow, pulse, glowK)
+        visMeter.level = level; visMeter.fps = fps; visMeter.invalidate()
+        // the visual stage: drifting glow layers above 60 %, max refresh rate when high, lowest when low
+        load.color = dGlow; val lv = ((level - 0.6f) / 0.4f).coerceIn(0f, 1f)
+        if (lv > 0.005f || load.level > 0f) { load.level = lv; load.invalidate() }
+        applyRefresh(level)
 
         batV.text = "${m.pct}%"
         batS.text = if (m.mah.isNaN()) "— mAh" else fmtInt(m.mah) + " mAh" + (if (m.enabled && !c.targetMah.isNaN()) " · target " + fmtInt(c.targetMah) else "")
         batSrc.text = "source: " + m.mahT.source
-        // brake = % of the most it can do now (CPU max + render stage); bar: teal = visual, orange = CPU
+        // brake = % of the most it can do now (CPU max + visual stage); bar: teal = visual, orange = CPU
         val mo = c.maxOut.coerceAtLeast(0.01f)
-        brkV.text = "${(dBurn / mo * 100).roundToInt().coerceIn(0, 100)}%"; brkBar.frac = dBurn / mo; brkBar.visFrac = m.split.vis / mo; brkBar.invalidate()
-        brkS.text = if (m.split.vis > 0.005f || m.renderOk) "visual ~${fmtInt(m.visMw)} · CPU ~${fmtInt(m.cpuMw)} mW"
+        brkV.text = "${(dBurn / mo * 100).safeRound().coerceIn(0, 100)}%"; brkBar.frac = dBurn / mo; brkBar.visFrac = m.split.vis / mo; brkBar.invalidate()
+        brkS.text = if (m.renderOk && m.enabled) "visual ~${fmtInt(m.visMw)} · CPU ~${fmtInt(m.cpuMw)} mW"
             else "${m.effThreads} threads${if (m.power == Monitor.P_MAX) " (normal prio)" else ""} · ~${fmtInt(m.burnMw)} mW"
-        brkTile.glowColor = C_ORANGE; brkTile.glow = (dBurn / mo).coerceIn(0f, 1f) * 0.8f; brkTile.stroke = brkTile.glow; brkTile.invalidate()
+        brkTile.glowColor = C_ORANGE; brkTile.glow = (dBurn / mo).coerceIn(0f, 1f) * 0.8f * glowK; brkTile.stroke = (dBurn / mo).coerceIn(0f, 1f) * 0.8f; brkTile.invalidate()
         surV.text = if (m.plugged == 0) "n/a" else "~" + fmtSigned(dSur) + " mW"
         surS.text = if (m.plugged == 0) "not plugged in" else "net + brake power"
         tmpV.text = String.format(Locale.US, "%.1f °C", dTemp)
@@ -572,28 +565,28 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             val qc = Quality.color(m.minPerPct)
             qV.text = Quality.value(m); qV.setTextColor(qc); qS.text = Quality.sub(m)
             qKey.background = round(qc, dpf(2f))
-            qTile.glowColor = qc; qTile.glow = if (m.minPerPct < 10f) 0.6f else 0.25f; qTile.stroke = qTile.glow; qTile.invalidate()
+            qTile.glowColor = qc; qTile.glow = (if (m.minPerPct < 10f) 0.6f else 0.25f) * glowK; qTile.stroke = if (m.minPerPct < 10f) 0.6f else 0.25f; qTile.invalidate()
         } else if (qTile.visibility != View.GONE) qTile.visibility = View.GONE
 
-        gCard.glowColor = dGlow; gCard.glow = 0.55f; gCard.tint = 0.6f; gCard.stroke = 0.8f; gCard.invalidate()
+        gCard.glowColor = dGlow; gCard.glow = 0.55f * glowK; gCard.tint = 0.6f; gCard.stroke = 0.8f; gCard.invalidate()
         gTitle.text = "Power · last ${m.spanLabel()}"
+        chart.animate = anim; chart.simple = level < 0.12f
         chart.glowColor = dGlow; chart.headColor = dNumCol; chart.invalidate()
         cTitle.text = "Charge · last ${m.spanLabel()}"
         cNow.text = if (m.mah.isNaN()) "${m.pct}%" else "${fmtInt(m.mah)} mAh · ${m.pct}% · ${m.mahT.source}"
-        charge.invalidate()
+        charge.animate = anim; charge.invalidate()
 
         pill.pos += ((if (m.enabled) 1f else 0f) - pill.pos) * (1f - exp(-dt / 0.12f)); pill.invalidate()
         brakeTitle.text = if (m.enabled) "Brake ON" else "Brake OFF"
-        brakeCard.glowColor = dGlow; brakeCard.glow = if (m.enabled) 0.6f else 0f; brakeCard.tint = if (m.enabled) 0.8f else 0f; brakeCard.stroke = brakeCard.glow; brakeCard.invalidate()
+        brakeCard.glowColor = dGlow; brakeCard.glow = (if (m.enabled) 0.6f else 0f) * glowK; brakeCard.tint = if (m.enabled) 0.8f else 0f; brakeCard.stroke = if (m.enabled) 0.6f else 0f; brakeCard.invalidate()
         val plugged = m.plugged != 0
         setKeepOn(plugged)
-        screenOn.text = (if (plugged) "☀ Screen stays on while plugged" else "Screen on: only while plugged in") + (if (live) " · Live" else " · Eco")
-        screenOn.setTextColor(if (plugged) C_GREEN else C_DIM)
+        val so = if (plugged) "Screen stays on while plugged" else "Screen on: only while plugged in"
+        if (screenOn.text != so) { screenOn.text = so; screenOn.setTextColor(if (plugged) C_GREEN else C_DIM); iconStart(screenOn, R.drawable.ic_sun, if (plugged) C_GREEN else C_DIM) }
         val bOn = m.bubble && Settings.canDrawOverlays(this)
         bubPill.pos += ((if (bOn) 1f else 0f) - bubPill.pos) * (1f - exp(-dt / 0.12f)); bubPill.invalidate()
-        bubSub.text = when { !bOn -> "over other apps · tap to turn on"; m.enabled -> "on · tap it to expand, long-press to open"; else -> "on · shows while Brake is on" }
+        bubSub.text = when { !bOn -> "over other apps · tap to turn on"; m.enabled -> "on · hidden while this screen is open"; else -> "on · shows while Brake is on" }
         updTarget()
-        if (live) dots.forEach { it.invalidate() }
         maybeSnap()
 
         if (bgColor == 0 || dGlow != bgColor) {
@@ -603,5 +596,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 colors = intArrayOf(withAlpha(dGlow, 0.11f), C_BG)
             }
         }
+    }
+
+    private fun iconStart(t: TextView, res: Int, col: Int) {
+        val d = getDrawable(res)!!.mutate(); d.setTint(col); val s = dp(14); d.setBounds(0, 0, s, s)
+        t.setCompoundDrawables(d, null, null, null); t.compoundDrawablePadding = dp(5)
+    }
+    private fun iconEnd(t: TextView, res: Int, col: Int) {
+        val d = getDrawable(res)!!.mutate(); d.setTint(col); val s = dp(15); d.setBounds(0, 0, s, s)
+        t.setCompoundDrawables(null, null, d, null); t.compoundDrawablePadding = dp(6)
     }
 }

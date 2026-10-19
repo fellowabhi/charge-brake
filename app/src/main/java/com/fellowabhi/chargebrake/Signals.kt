@@ -137,3 +137,38 @@ class UiCost {
         return if (secs[p][mode] >= 60f && secs[p][0] >= 60f) mean[p][0] - mean[p][mode] else Float.NaN
     }
 }
+
+/**
+ * Phone use (est.): on battery = −net. Plugged = charger estimate − net − brake, where the charger estimate is the slow
+ * (3 min) average surplus plus the phone use last measured on battery. On every plug change both are reset together,
+ * so "phone use known but charger unknown" can't happen (v0.5.1 crashed formatting that NaN after a replug when the
+ * first readings were 0 / not ok).
+ */
+class UseEstimator {
+    var useBase = Float.NaN                  // phone use measured on battery (persisted by the caller)
+    var phoneUse = Float.NaN; private set
+    var chargerEst = Float.NaN; private set
+    private var surSlow = Float.NaN
+    private var lastPlugged = -1
+    /** @return true when the on-battery calibration should be saved (just plugged in). */
+    fun update(dt: Float, plugged: Boolean, mwOk: Boolean, mW: Float, avgMw: Float, burnMw: Float): Boolean {
+        var save = false
+        val p = if (plugged) 1 else 0
+        if (p != lastPlugged) {
+            if (lastPlugged == 0 && plugged && !useBase.isNaN()) save = true
+            lastPlugged = p; surSlow = Float.NaN; phoneUse = Float.NaN; chargerEst = Float.NaN
+        }
+        if (!mwOk || !mW.isFinite() || !avgMw.isFinite() || !burnMw.isFinite()) return save
+        if (!plugged) {
+            useBase = if (useBase.isNaN()) -mW else useBase + (-mW - useBase) * dt / (30f + dt)
+            phoneUse = -avgMw; chargerEst = Float.NaN
+        } else {
+            val sur = mW + burnMw
+            surSlow = if (surSlow.isNaN()) sur else surSlow + (sur - surSlow) * dt / (180f + dt)
+            if (useBase.isNaN()) { phoneUse = Float.NaN; chargerEst = Float.NaN; return save }
+            chargerEst = surSlow + useBase.coerceAtLeast(0f)
+            phoneUse = chargerEst - avgMw - burnMw
+        }
+        return save
+    }
+}

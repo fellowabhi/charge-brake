@@ -19,8 +19,8 @@ import kotlin.math.abs
 
 /** Samples the battery every 250 ms, runs the controller when enabled, keeps history + CSV log. */
 object Monitor {
-    const val VERSION = "0.5.1"
-    const val VERSION_CODE = 5
+    const val VERSION = "0.5.2"
+    const val VERSION_CODE = 6
     const val TICK_MS = 250L
     val cfg = Cfg()
     val ctl = Controller(cfg)
@@ -35,18 +35,27 @@ object Monitor {
     fun nextSpan() { val k = SPANS.indexOf(spanMs); spanMs = SPANS[(k + 1) % SPANS.size]; prefs.edit().putLong("span", spanMs).apply() }
     fun spanLabel(ms: Long = spanMs) = if (ms >= 3_600_000L) "${ms / 3_600_000L} h" else "${ms / 60_000L} min"
     // UI prefs
-    var live = false; private set           // main screen: false = Eco view (default), true = Live (smooth, screen on)
-    fun setLive(on: Boolean) { live = on; prefs.edit().putBoolean("live", on).apply(); event("view ${if (on) "live" else "eco"}") }
+    /** Always smooth: the visuals never go below a smooth level (a fixed cost the brake works around). Off by default. */
+    var alwaysSmooth = false; private set
+    fun setAlwaysSmooth(on: Boolean) { alwaysSmooth = on; split.floor = if (on) SMOOTH_FLOOR else 0f; prefs.edit().putBoolean("smooth", on).apply(); event("always smooth $on") }
     var bubble = false; private set
-    fun setBubble(on: Boolean) { bubble = on; prefs.edit().putBoolean("bubble", on).apply(); event("bubble $on") }
+    val bubbleListeners = CopyOnWriteArrayList<() -> Unit>()
+    fun setBubble(on: Boolean) { bubble = on; prefs.edit().putBoolean("bubble", on).apply(); event("bubble $on"); bubbleListeners.forEach { it() } }
     val p: SharedPreferences get() = prefs
-    // own UI cost estimate: which UI is showing (set by MainActivity)
-    @Volatile var uiMode = UI_NONE
-    const val UI_NONE = 0; const val UI_ECO = 1; const val UI_LIVE = 2
+    // the main screen on screen? (bubble auto-hides while it is; the visual brake stage needs it)
+    @Volatile var appVisible = false; private set
+    fun setAppVisible(v: Boolean) { if (v == appVisible) return; appVisible = v; uiMode = if (v) UI_APP else UI_NONE; bubbleListeners.forEach { it() } }
+    @Volatile var uiMode = UI_NONE; private set
+    const val UI_NONE = 0; const val UI_APP = 1
     val cost = UiCost()
-    // brake stages: render (Live view on screen) first, then CPU
+    // debug logging (CSV): off by default
+    var debugLog = false; private set
+    fun setDebugLog(on: Boolean) { if (on) debugLog = true; event("debug logging $on"); debugLog = on; prefs.edit().putBoolean("dlog", on).apply() }
+    // brake stages: the app's own visuals (only while it is on screen) first in both directions, CPU for the rest
     val split = BrakeSplit()
-    @Volatile var visLevel = 0f; private set          // 0..1 render-brake intensity the activity applies
+    const val SMOOTH_FLOOR = 0.5f
+    const val IDLE_LEVEL = 0.3f                       // visual level while the brake is off
+    @Volatile var visLevel = IDLE_LEVEL; private set  // 0..1 visual level the main screen applies
     @Volatile var renderOk = false; private set
     val visMw get() = split.vis * cfg.burnMwFull       // estimated brake power from rendering
     val cpuMw get() = split.cpu * cfg.burnMwFull
@@ -81,6 +90,10 @@ object Monitor {
     /** "2,916 mAh (≈60%)" for a target mAh. */
     fun mahLabel(v: Float) = if (v.isNaN()) "${ctl.hold()}%" else "${fmtInt(v)} mAh (≈${ctl.approxPct(v, pct, mahT.mah)}%)"
     private var pm: android.os.PowerManager? = null
+    private val use = UseEstimator()
+    val phoneUse get() = use.phoneUse
+    val chargerEst get() = use.chargerEst
+    val useBase get() = use.useBase
     const val AVG_S = 1.5f                   // display smoothing of the big number / white line
     private val log = ArrayDeque<String>()   // 1 Hz rows + events, last ~4 h
     private const val LOG_CAP = 15_000
@@ -102,10 +115,7 @@ object Monitor {
     @Volatile var raw = 0; var rawAvg = 0; var supported = true
     @Volatile var mA = 0f; var volt = 0f; var mW = 0f; var temp = 0f
     @Volatile var avgMw = 0f                 // 1.5 s average for the big number
-    // phone-use estimate
-    @Volatile var phoneUse = Float.NaN; @Volatile var chargerEst = Float.NaN
-    var useBase = Float.NaN                  // phone use measured while unplugged (persisted)
-    private var surSlow = Float.NaN; private var lastPlugged = -1; private var lastL = 0L
+    private var lastL = 0L
     @Volatile var pct = 0; var plugged = 0; var status = 0; var health = 0
     var chargeCounter = 0; var maxChgUa = -1; var maxChgUv = -1
     @Volatile var rateHz = 0f; var mwOk = false; var lastChange = 0L
@@ -146,13 +156,15 @@ object Monitor {
             threads = getInt("threads", 4); invert = getBoolean("invert", false)
             unitUa = getBoolean("ua", false); unitKnown = getBoolean("uaKnown", false)
             flip = getBoolean("flip", false); signKnown = getBoolean("signKnown", false)
-            ctl.holdPct = getInt("hold", -1); ctl.holdMah = getFloat("holdMah", Float.NaN); holdSrc = getString("holdSrc", "") ?: ""; useBase = getFloat("useBase", Float.NaN)
+            ctl.holdPct = getInt("hold", -1); ctl.holdMah = getFloat("holdMah", Float.NaN); holdSrc = getString("holdSrc", "") ?: ""; use.useBase = getFloat("useBase", Float.NaN)
             spanMs = getLong("span", 120_000L).takeIf { it in SPANS } ?: 120_000L
-            live = getBoolean("live", false); bubble = getBoolean("bubble", false)
+            alwaysSmooth = getBoolean("smooth", false); bubble = getBoolean("bubble", false); debugLog = getBoolean("dlog", false)
+            cfg.aggr = cfg.aggr.coerceIn(1, Controller.AGGR_MAX)
             power = getInt("power", P_NORMAL).coerceIn(0, 2); targetByMah = getBoolean("tUnit", false)
             cfg.targetMahSet = getFloat("tMah", Float.NaN); tgtSrc = getString("tSrc", "") ?: ""
         }
         applyPower()
+        split.floor = if (alwaysSmooth) SMOOTH_FLOOR else 0f
         t0 = SystemClock.elapsedRealtime()
     }
 
@@ -212,7 +224,7 @@ object Monitor {
                 burner.start(effThreads, power == P_MAX); enabled = true
                 event(if (resume) "brake on (resumed, hold ${ctl.holdPct}%)" else "brake on (hold locked ${ctl.hold()}%)")
             } else if (!on && enabled) {
-                enabled = false; ctl.disarm(); burner.stop(); cfg.visCap = 0f; split.split(0f, 0f, cfg.burnMwFull); visLevel = 0f; event("brake off")
+                enabled = false; ctl.disarm(); burner.stop(); cfg.visCap = 0f; split.reset(); event("brake off")
             }
             save()
         }
@@ -286,8 +298,9 @@ object Monitor {
         mA = if (flip xor invert) -m else m
         mW = mA * volt
         mwOk = supported && r != 0 && volt > 2.5f && now - lastChange < 30_000 && abs(mW) < 30_000
-        avgMw += (mW - avgMw) * dt / (AVG_S + dt)
-        estimateUse(dt)
+        if (mwOk) avgMw += (mW - avgMw) * dt / (AVG_S + dt)
+        if (!avgMw.isFinite()) avgMw = 0f
+        if (use.update(dt, plugged != 0, mwOk, mW, avgMw, burnMw)) prefs.edit().putFloat("useBase", use.useBase).apply()
 
         val switched = mahT.update(now, chargeCounter, mA, mwOk, pct, cfg.capacityMah)
         val shift = smooth.update(dt, mahT.mah, mahT.source, mA, mwOk)
@@ -301,40 +314,21 @@ object Monitor {
 
         var b = 0f
         if (enabled) {
-            // render stage only in Live view, activity on screen, screen on
-            renderOk = live && uiMode == UI_LIVE && pm?.isInteractive == true
+            // visual stage only while the main screen is on screen (screen on)
+            renderOk = appVisible && pm?.isInteractive == true
             val cap = split.update(dt, renderOk, cfg.burnMwFull)
             cfg.visCap = cap
             b = ctl.step(Input(now, mW, mwOk, pct, plugged != 0, temp, mahT.mah))
-            split.split(b, cap, cfg.burnMwFull)
-            burner.level = split.cpu; visLevel = split.visLevel
+            split.split(b, cap, cfg.burnMwFull, dt, ctl.short)
+            burner.level = split.cpu; visLevel = if (renderOk) split.visLevel else split.floor
             if (ctl.holdMah.toBits() != savedHoldMah.toBits()) { savedHoldMah = ctl.holdMah; holdSrc = mahT.source; save() }
         }
+        else { renderOk = false; visLevel = if (alwaysSmooth) 0.6f else IDLE_LEVEL }
         hist.add(now, mW, avgMw, b, if (enabled) ctl.tgtMw else 0f, pct, mahT.mah, if (enabled) ctl.targetMah else Float.NaN)
         if (now - lastL >= 1000) { lastL = now; lhist.add(now, smooth.value, if (enabled) ctl.targetMah else Float.NaN, pct, state, avgMw) }
         if (now - lastLog >= 1000) {
-            lastLog = now; updateDrift(); addLog(now, b, "")
+            lastLog = now; updateDrift(); if (debugLog) addLog(now, b, "")
             if (mwOk) cost.add(uiMode, pm?.isInteractive == true, plugged != 0, mW + burnMw, 1f)
-        }
-    }
-
-    /** Phone use (est.): unplugged = −net. Plugged = charger estimate − net − brake, where the charger estimate is
-     *  the slow (3 min) average surplus plus the phone use last measured on battery. */
-    private fun estimateUse(dt: Float) {
-        if (plugged != lastPlugged) {
-            if (lastPlugged == 0 && plugged != 0 && !useBase.isNaN()) prefs.edit().putFloat("useBase", useBase).apply()
-            lastPlugged = plugged; surSlow = Float.NaN
-        }
-        if (!mwOk) return
-        if (plugged == 0) {
-            useBase = if (useBase.isNaN()) -mW else useBase + (-mW - useBase) * dt / (30f + dt)
-            phoneUse = -avgMw; chargerEst = Float.NaN
-        } else {
-            val sur = mW + burnMw
-            surSlow = if (surSlow.isNaN()) sur else surSlow + (sur - surSlow) * dt / (180f + dt)
-            if (useBase.isNaN()) { phoneUse = Float.NaN; chargerEst = Float.NaN; return }
-            chargerEst = surSlow + useBase.coerceAtLeast(0f)
-            phoneUse = chargerEst - avgMw - burnMw
         }
     }
 
@@ -348,27 +342,27 @@ object Monitor {
     private fun updateDrift() { if (!holdingNow) drift.reset() else if (mwOk) drift.add(mW, volt, cfg.capacityMah, ctl.burn, ctl.maxOut) }
 
     private val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-    private const val COLS = "time,elapsed_s,event,raw_current_now,raw_current_avg,mA,V,mW,avg_mW,phone_use_est_mW,ema_mW,ema_use_mW,target_mW,burn,pct,mAh,target_mAh,mAh_source,charge_counter,temp_C,plugged,status,state,enabled,paused,hold_pct,mode,eff_mode,hold_mode,target_pct,temp_cutoff,fast_cutoff_mW,fast_avg_mW,aggr,max_burn,threads,capacity,sensor_hz,mw_ok,unit_ua,flip,invert,drain_speed,hold_drift_mW,hold_min_per_pct,ui_mode,graph_mAh,brake_visual,brake_cpu,max_power"
+    private const val COLS = "time,elapsed_s,event,raw_current_now,raw_current_avg,mA,V,mW,avg_mW,phone_use_est_mW,ema_mW,ema_use_mW,target_mW,burn,pct,mAh,target_mAh,mAh_source,charge_counter,temp_C,plugged,status,state,enabled,paused,hold_pct,mode,eff_mode,hold_mode,target_pct,temp_cutoff,fast_cutoff_mW,fast_avg_mW,aggr,max_burn,threads,capacity,sensor_hz,mw_ok,unit_ua,flip,invert,drain_speed,hold_drift_mW,hold_min_per_pct,ui_mode,graph_mAh,brake_visual,brake_cpu,max_power,visual_level,ff_pred_mW,settle_s"
 
-    fun event(e: String) { h?.post { addLog(SystemClock.elapsedRealtime(), ctl.burn, e) } ?: addLog(SystemClock.elapsedRealtime(), ctl.burn, e) }
+    fun event(e: String) { if (!debugLog) return; h?.post { addLog(SystemClock.elapsedRealtime(), ctl.burn, e) } ?: addLog(SystemClock.elapsedRealtime(), ctl.burn, e) }
 
     private fun addLog(now: Long, b: Float, ev: String) {
         val row = String.format(Locale.US,
-            "%s,%.1f,%s,%d,%d,%.1f,%.3f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%d,%.1f,%.1f,%s,%d,%.1f,%d,%d,%s,%b,%b,%d,%s,%s,%s,%d,%.1f,%d,%.0f,%d,%.2f,%d,%.0f,%.2f,%b,%b,%b,%b,%s,%.0f,%.0f,%s,%.2f,%.3f,%.3f,%s",
+            "%s,%.1f,%s,%d,%d,%.1f,%.3f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%d,%.1f,%.1f,%s,%d,%.1f,%d,%d,%s,%b,%b,%d,%s,%s,%s,%d,%.1f,%d,%.0f,%d,%.2f,%d,%.0f,%.2f,%b,%b,%b,%b,%s,%.0f,%.0f,%s,%.2f,%.3f,%.3f,%s,%.2f,%.0f,%.1f",
             df.format(Date()), (now - t0) / 1000f, ev.replace(',', ';'), raw, rawAvg, mA, volt, mW, avgMw, phoneUse, ctl.emaSlow, ctl.emaUse, ctl.tgtMw, b, pct,
             mahT.mah, ctl.targetMah, mahT.source, chargeCounter, temp, plugged, status, state.name, enabled, ctl.paused, ctl.hold(),
             Mode.name(cfg.mode), Mode.name(ctl.effMode), if (cfg.holdCurrent) "current" else "target", cfg.targetPct, cfg.tempCutoffC,
             cfg.fastCutoffMw, ctl.fastMw, cfg.aggr, cfg.maxBurn, burner.threads, cfg.capacityMah, rateHz, mwOk,
-            unitUa || maxAbs > 15_000, flip, invert, Drain.name(cfg.drainSpeed), driftMw, minPerPct, when (uiMode) { UI_ECO -> "eco"; UI_LIVE -> "live"; else -> "bg" }, smooth.value, split.vis, split.cpu, powerName())
+            unitUa || maxAbs > 15_000, flip, invert, Drain.name(cfg.drainSpeed), driftMw, minPerPct, if (uiMode == UI_APP) "app" else "bg", smooth.value, split.vis, split.cpu, powerName(), visLevel, ctl.ePred, ctl.lastSettleS)
         synchronized(log) { log.addLast(row); if (log.size > LOG_CAP) log.removeFirst() }
     }
 
     fun csv(): String = synchronized(log) {
         buildString {
             append("# Charge Brake v$VERSION (code $VERSION_CODE) · ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}\n")
-            append(String.format(Locale.US, "# capacity %.0f mAh (rated %.0f from %s) · temp cutoff %.1f C · fast cutoff %d mW (10 s avg, 2 min retry) · avg_mW = %.1f s average · mode %s · hold %s %d%% · aggr %d · max burn %.2f · threads %d · drain %s\n",
+            append(String.format(Locale.US, "# capacity %.0f mAh (rated %.0f from %s) · temp cutoff %.1f C · fast cutoff %d mW (10 s avg, 2 min retry) · avg_mW = %.1f s average · mode %s · hold %s %d%% · aggr %d · max burn %.2f · threads %d · drain %s · always smooth %b\n",
                 cfg.capacityMah, ratedMah, ratedSrc, cfg.tempCutoffC, cfg.fastCutoffMw, AVG_S, Mode.name(cfg.mode),
-                if (cfg.holdCurrent) "current" else "target", ctl.hold(), cfg.aggr, cfg.maxBurn, threads, Drain.name(cfg.drainSpeed)))
+                if (cfg.holdCurrent) "current" else "target", ctl.hold(), cfg.aggr, cfg.maxBurn, threads, Drain.name(cfg.drainSpeed), alwaysSmooth))
             append(COLS).append('\n'); log.forEach { append(it).append('\n') }
         }
     }

@@ -27,8 +27,10 @@ fun withAlpha(c: Int, a: Float) = (c and 0xFFFFFF) or ((a.coerceIn(0f, 1f) * 255
 
 fun numColor(mw: Float) = when { mw > 100f -> C_AMBER; mw < -100f -> C_BLUE; else -> C_GREEN }
 
-fun fmtInt(v: Float) = String.format(Locale.US, "%,d", v.roundToInt())
-fun fmtSigned(v: Float) = (if (v >= 0) "+" else "−") + fmtInt(abs(v))
+/** NaN / infinity safe (roundToInt() throws on NaN: the v0.5.1 replug crash). */
+fun fmtInt(v: Float) = if (!v.isFinite()) "—" else String.format(Locale.US, "%,d", v.roundToInt())
+fun fmtSigned(v: Float) = if (!v.isFinite()) "—" else (if (v >= 0) "+" else "−") + fmtInt(abs(v))
+fun Float.safeRound() = if (isFinite()) roundToInt() else 0
 
 /** Colour, icon and plain-words text for each state. */
 object Look {
@@ -40,10 +42,6 @@ object Look {
         St.CHARGING_UP -> C_AMBER
         St.HOT, St.NO_READING -> C_RED
         St.FAST, St.PAUSED, St.OFF, St.UNPLUGGED -> C_GREY
-    }
-    fun glyph(s: St) = when (s) {
-        St.BRAKING -> "‖"; St.DRAINING -> "↘"; St.HOLDING, St.IDLE -> "✓"; St.IN_USE -> "↓"; St.CHARGING_UP -> "↑"
-        St.HOT -> "!"; St.NO_READING -> "?"; St.PAUSED -> "‖"; St.FAST -> "!"; else -> "×"
     }
     fun icon(s: St) = when (s) {
         St.BRAKING -> R.drawable.ic_st_brake
@@ -63,51 +61,80 @@ object Look {
         return if (m.mah.isNaN()) Float.NaN else m.mah + (m.cfg.targetPct - m.pct) * m.cfg.capacityMah / 100f
     }
     private fun goalTxt(m: Monitor) = m.mahLabel(goalMah(m))
-    private fun toGo(m: Monitor, down: Boolean): String {
-        val t = goalMah(m)
-        return if (t.isNaN() || m.mah.isNaN()) "" else (if (down) "~" else "") + fmtInt(maxOf(0f, if (down) m.mah - t else t - m.mah)) + " mAh to go · "
-    }
     /** What the brake would hold if started now. */
     fun planned(m: Monitor) = if (m.cfg.holdCurrent) "the current " + (if (m.mah.isNaN()) "${m.pct}%" else "${fmtInt(m.mah)} mAh") else goalTxt(m)
 
+    /** "2,916 mAh" (no %), for compact lines. */
+    private fun mahShort(m: Monitor): String { val g = goalMah(m); return if (g.isNaN()) "${m.ctl.hold()}%" else "${fmtInt(g)} mAh" }
+    private fun approx(m: Monitor): String { val g = goalMah(m); return if (g.isNaN()) "" else "≈${m.ctl.approxPct(g, m.pct, m.mah)}%" }
+    private fun togo(m: Monitor, down: Boolean): String {
+        val t = goalMah(m)
+        return if (t.isNaN() || m.mah.isNaN()) "" else fmtInt(maxOf(0f, if (down) m.mah - t else t - m.mah)) + " mAh to go"
+    }
+    private fun bmw(m: Monitor) = fmtInt(((m.burnMw / 10f).safeRound() * 10).toFloat()) + " mW"
+
+    /** Banner title: short, state first (auto-fitted to one line). */
     fun title(s: St, m: Monitor): String {
         val c = m.ctl
         return when (s) {
-            St.OFF -> if (m.plugged == 0) "Off · not plugged in" else "Off"
+            St.OFF -> if (m.plugged == 0) "Off · not plugged in" else "Ready · hold ${plannedShort(m)}"
             St.UNPLUGGED -> "Unplugged · waiting"
-            St.CHARGING_UP -> "Charging up to ${goalTxt(m)}"
-            St.DRAINING -> "Draining to ${goalTxt(m)}"
-            St.BRAKING -> "Hold ${goalTxt(m)} · braking"
-            St.HOLDING, St.IDLE -> "Hold ${goalTxt(m)}"
-            St.IN_USE -> "Hold ${goalTxt(m)} · phone in use"
-            St.HOT -> String.format(Locale.US, "Paused: too hot (%.1f °C)", m.temp)
-            St.FAST -> String.format(Locale.US, "Off: fast charging (%.1f W)", c.fastMw / 1000f)
+            St.CHARGING_UP -> togo(m, false).let { if (it.isEmpty()) "Charging up" else "Charging · $it" }
+            St.DRAINING -> togo(m, true).let { if (it.isEmpty()) "Draining" else "Draining · $it" }
+            St.BRAKING -> "Braking · ${bmw(m)} · hold ${mahShort(m)}"
+            St.HOLDING, St.IDLE -> "Holding · ${mahShort(m)}"
+            St.IN_USE -> "Phone in use · hold ${mahShort(m)}"
+            St.HOT -> String.format(Locale.US, "Too hot · %.1f °C", m.temp)
+            St.FAST -> String.format(Locale.US, "Fast charger · %.1f W", c.fastMw / 1000f)
             St.NO_READING -> "No power reading"
-            St.PAUSED -> "Paused"
+            St.PAUSED -> "Paused · hold ${mahShort(m)}"
         }
     }
+    /** Banner second line: one short detail. */
     fun sub(s: St, m: Monitor): String {
-        val c = m.ctl; val bmw = (m.burnMw / 10f).roundToInt() * 10
+        val c = m.ctl; val ap = approx(m).let { if (it.isEmpty()) "" else "$it · " }
         return when (s) {
-            St.OFF -> if (m.plugged == 0) "Plug in, then Start to hold ${planned(m)}" else "Start to hold ${planned(m)} while plugged in"
-            St.UNPLUGGED -> "brake idle · plug in to hold ${goalTxt(m)}"
-            St.CHARGING_UP -> toGo(m, false) + "charging normally, brake idle"
-            St.DRAINING -> toGo(m, true) + "${Drain.name(m.cfg.drainSpeed)} drain (${Drain.desc(m.cfg.drainSpeed)}) · then holds"
-            St.BRAKING -> "brake ~$bmw mW pulls the net to 0"
-            St.HOLDING -> "brake ~$bmw mW"
-            St.IDLE -> "no surplus · brake not needed"
-            St.IN_USE -> "phone uses more than the charger gives · brake backing off"
-            St.HOT -> String.format(Locale.US, "cutoff %.0f °C · resumes below %.0f °C", m.cfg.tempCutoffC, m.cfg.tempCutoffC - 1)
-            St.FAST -> String.format(Locale.US, "brake off to protect the charger · retry in %d:%02d", c.fastRetryInS / 60, c.fastRetryInS % 60)
-            St.NO_READING -> "current sensor gives no data · switch mode to Auto or %"
-            St.PAUSED -> "paused by you · holding ${goalTxt(m)} when resumed"
+            St.OFF -> if (m.plugged == 0) "plug in, then Start" else ap + "tap Start"
+            St.UNPLUGGED -> "brake idle · plug in to hold ${mahShort(m)}"
+            St.CHARGING_UP -> "to ${goalTxt(m)} · brake idle"
+            St.DRAINING -> "to ${mahShort(m)} · ${Drain.name(m.cfg.drainSpeed)} ${Drain.desc(m.cfg.drainSpeed)}"
+            St.BRAKING -> ap + "pulling the net to 0"
+            St.HOLDING -> ap + "brake ${bmw(m)}"
+            St.IDLE -> ap + "no surplus · brake idle"
+            St.IN_USE -> "use > charger · brake backing off"
+            St.HOT -> String.format(Locale.US, "brake paused · resumes below %.0f °C", m.cfg.tempCutoffC - 1)
+            St.FAST -> String.format(Locale.US, "brake off · retry in %d:%02d", c.fastRetryInS / 60, c.fastRetryInS % 60)
+            St.NO_READING -> "sensor gives no data · try mode % in Details"
+            St.PAUSED -> "paused by you · tap Resume"
         }
+    }
+    private fun plannedShort(m: Monitor) = if (m.cfg.holdCurrent) (if (m.mah.isNaN()) "${m.pct}%" else "${fmtInt(m.mah)} mAh") else mahShort(m)
+    /** Vector icon for the banner / bubble / chips. */
+    fun uiIcon(s: St) = when (s) {
+        St.BRAKING -> R.drawable.ic_brake
+        St.DRAINING -> R.drawable.ic_drain
+        St.HOLDING, St.IDLE -> R.drawable.ic_check
+        St.IN_USE -> R.drawable.ic_down
+        St.CHARGING_UP -> R.drawable.ic_up
+        St.HOT -> R.drawable.ic_flame
+        St.NO_READING -> R.drawable.ic_help
+        St.PAUSED -> R.drawable.ic_pause
+        St.FAST -> R.drawable.ic_warn
+        St.OFF -> R.drawable.ic_power
+        St.UNPLUGGED -> R.drawable.ic_plug
+    }
+    /** Short state word for the bubble pill. */
+    fun word(s: St) = when (s) {
+        St.BRAKING -> "Braking"; St.HOLDING, St.IDLE -> "Holding"; St.IN_USE -> "Phone in use"; St.CHARGING_UP -> "Charging up"
+        St.DRAINING -> "Draining"; St.HOT -> "Too hot"; St.FAST -> "Fast charger"; St.NO_READING -> "No reading"
+        St.UNPLUGGED -> "Unplugged"; St.PAUSED -> "Paused"; St.OFF -> "Off"
     }
     /** Banner action button for this state, or null. */
     fun action(s: St) = when (s) { St.OFF -> "Start"; St.PAUSED -> "Resume"; St.FAST -> "Ignore"; else -> null }
 }
 
 fun fmtDur(min: Float): String {
+    if (!min.isFinite()) return "—"
     val m = min.roundToInt()
     return if (m < 60) "$m m" else "${m / 60} h ${String.format(Locale.US, "%02d", m % 60)} m"
 }
@@ -118,7 +145,7 @@ object Quality {
         val q = m.minPerPct
         return when {
             q.isNaN() -> "measuring…"
-            q.isInfinite() -> "∞ · steady"
+            q.isInfinite() -> "steady"
             else -> "~${fmtDur(q)} per 1%"
         }
     }

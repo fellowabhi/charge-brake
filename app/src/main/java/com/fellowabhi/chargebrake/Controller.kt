@@ -32,7 +32,7 @@ class Cfg {
     @Volatile var drainSpeed = Drain.NORMAL  // above the target: Gentle −150 mW, Normal −400 mW, Fast = max brake (temp cutoff still applies)
     @Volatile var fastCutoffMw = 6000     // 10 s average of (net + brake) above this = fast charger
     @Volatile var tempCutoffC = 45f
-    @Volatile var aggr = 3                // 1..5
+    @Volatile var aggr = 3                // 1..6 (6 = Direct)
     @Volatile var maxBurn = 0.8f          // 0..1
     @Volatile var burnMwFull = 1500f      // rough mW at burn = 1.0
     @Volatile var capacityMah = 4860f
@@ -70,6 +70,19 @@ class Controller(val cfg: Cfg) {
     var hot = false; private set
     var draining = false; private set
     var useS = 0f; private set
+    var short = false; private set       // net below the target (brake should come down): the split drops visuals first
+    // feed-forward: predicted error once the brake already commanded shows up in the (lagging) reading
+    var ePred = 0f; private set
+    private var emaFF = 0f
+    private var ffHold = 0f; private var ffCool = 0f
+    private var burnLag = 0f
+    private var burnLagS = 0f            // the same through the slow filter: the integral works on the predicted error too
+    // time to settle after a step (power change > STEP_MW): until the net stays within SETTLE_MW for SETTLE_HOLD_S
+    var lastSettleS = Float.NaN; private set
+    var avgSettleS = Float.NaN; private set
+    var settling = false; private set
+    private var settleT0 = 0L; private var inBandSince = -1L
+    private var emaSettle = 0f              // fixed 6 s average for the settle measure (same for every level)
 
     private var lastT = -1L
     private var lastNet = Float.NaN
@@ -106,12 +119,12 @@ class Controller(val cfg: Cfg) {
     fun arm(pct: Int, mah: Float, keepHold: Boolean = false) {
         if (!keepHold || holdPct < 0) lockHold(pct, mah)
         burn = 0f; primed = false; lastT = -1; draining = false; fastUntil = -1; win.clear(); winSum = 0.0
-        targetMah = Float.NaN; reachedTarget = false
+        targetMah = Float.NaN; reachedTarget = false; burnLag = 0f; burnLagS = 0f; settling = false; inBandSince = -1
         retarget(pct, mah)
         st = St.IDLE
     }
 
-    fun disarm() { burn = 0f; primed = false; lastT = -1; st = St.OFF }
+    fun disarm() { burn = 0f; burnLag = 0f; burnLagS = 0f; primed = false; lastT = -1; st = St.OFF; settling = false; short = false }
 
     /** Called on hold-mode / target changes: resets the drain/charge choice; the target mAh itself is never re-captured here. */
     fun retarget(pct: Int, mah: Float) {
@@ -142,23 +155,28 @@ class Controller(val cfg: Cfg) {
     fun step(i: Input): Float {
         val dt = if (lastT < 0) 0.25f else ((i.tMs - lastT) / 1000f).coerceIn(0f, 2f)
         lastT = i.tMs
-        val a = cfg.aggr.coerceIn(1, 5) - 1
+        val a = cfg.aggr.coerceIn(1, AGGR_MAX) - 1
 
         if (!i.plugged) {
-            burn = 0f; primed = false; draining = false; fastUntil = -1; ignoreFast = false; win.clear(); winSum = 0.0
+            burn = 0f; burnLag = 0f; burnLagS = 0f; primed = false; draining = false; fastUntil = -1; ignoreFast = false; win.clear(); winSum = 0.0
+            settling = false; inBandSince = -1; short = false
             st = St.UNPLUGGED
             return burn
         }
+        // a garbage reading (NaN / inf) is treated as no reading
+        if (i.mwOk && !i.netMw.isFinite()) return step(Input(i.tMs, 0f, false, i.pct, i.plugged, i.tempC, i.mah))
         if (i.mwOk && i.netMw != lastNet) {
             if (lastChgMs >= 0) sensorPeriodS += (((i.tMs - lastChgMs) / 1000f).coerceIn(0.1f, 5f) - sensorPeriodS) * 0.05f
             lastChgMs = i.tMs; lastNet = i.netMw
         }
         if (i.mwOk) {
-            if (!primed) { emaFast = i.netMw; emaUse = i.netMw; emaSlow = i.netMw; primed = true }
+            if (!primed) { emaFast = i.netMw; emaUse = i.netMw; emaSlow = i.netMw; emaFF = i.netMw; emaSettle = i.netMw; burnLag = burn; burnLagS = burn; primed = true }
             else {
                 emaFast += (i.netMw - emaFast) * dt / (0.8f + dt)
-                // usage detector: 2.5 s at the field sensor rate (~1.8 Hz), longer for slower sensors
-                val tauUse = (2.5f * sensorPeriodS / 0.55f).coerceIn(2.5f, 6f)
+                emaFF += (i.netMw - emaFF) * dt / (TAU_FF[a] + dt)
+                emaSettle += (i.netMw - emaSettle) * dt / (6f + dt)
+                // usage detector: 2.5 s at the field sensor rate (~1.8 Hz), longer for slower sensors; scaled by aggressiveness
+                val tauUse = (USE_TAU_K[a] * 2.5f * sensorPeriodS / 0.55f).coerceIn(1.5f, 7f)
                 emaUse += (i.netMw - emaUse) * dt / (tauUse + dt)
                 emaSlow += (i.netMw - emaSlow) * dt / (TAU_SLOW[a] + dt)
             }
@@ -194,7 +212,37 @@ class Controller(val cfg: Cfg) {
             else -> pct(i, dt, h, a)
         }
         burn = burn.coerceIn(0f, maxOut)
+        // what the reading will show of the brake commanded so far (actuator + sensor + filter lag)
+        val tauP = TAU_FF[a] + PLANT_LAG_S + sensorPeriodS * 0.5f
+        burnLag += (burn - burnLag) * dt / (tauP + dt)
+        val tauS = TAU_SLOW[a] + PLANT_LAG_S + sensorPeriodS * 0.5f
+        burnLagS += (burn - burnLagS) * dt / (tauS + dt)
+        settle(i.tMs)
         return burn
+    }
+
+    /**
+     * Time to settle (shown in Details): a step starts when the 6 s average net leaves ±STEP_MW of the target. It is
+     * settled once that average has stayed within ±SETTLE_MW for SETTLE_HOLD_S; the time is when it entered the band.
+     * Excursions without a real brake change (noise) are dropped. Approximate: the reading is noisy.
+     */
+    private val bHist = ArrayDeque<Pair<Long, Float>>()
+    private var settleB0 = 0f
+    private var inBand = -1L
+    private fun settle(t: Long) {
+        val active = when (st) { St.HOLDING, St.BRAKING, St.IN_USE, St.IDLE -> true; else -> false }
+        if (!active || !primed || draining) { settling = false; bHist.clear(); return }
+        val e = abs(emaSettle - tgtMw)
+        bHist.addLast(t to burn); while (bHist.isNotEmpty() && t - bHist.first().first > 10_000L) bHist.removeFirst()
+        if (!settling) { if (e > STEP_MW) { settling = true; settleT0 = t; settleB0 = bHist.first().second; inBand = -1 }; return }
+        if (e < SETTLE_MW) { if (inBand < 0) inBand = t } else inBand = -1
+        if (inBand >= 0 && t - inBand >= (SETTLE_HOLD_S * 1000).toLong()) {
+            settling = false
+            if (abs(burn - settleB0) * cfg.burnMwFull < MIN_STEP_BRAKE_MW) return      // no real brake change: noise
+            lastSettleS = (inBand - settleT0) / 1000f
+            avgSettleS = if (avgSettleS.isNaN()) lastSettleS else avgSettleS + (lastSettleS - avgSettleS) * 0.3f
+        }
+        if (settling && t - settleT0 > 600_000L) settling = false   // never settled in 10 min: drop it
     }
 
     private fun mw(i: Input, dt: Float, h: Int, a: Int) {
@@ -219,13 +267,22 @@ class Controller(val cfg: Cfg) {
         }
         val g = cfg.burnMwFull
         val kUp = 1f / (g * TAU_UP[a])
-        val kDn = 1f / (g * 8f)
+        val kDn = 1f / (g * TAU_DN[a])
         val kUse = 1f / (g * 2f)
-        val eS = emaSlow - tgtMw
+        val eS = emaSlow - (burn - burnLagS) * g - tgtMw      // predicted: minus brake already on its way
         val eU = emaUse - tgtMw
+        // feed-forward: jump towards the brake the estimated surplus needs (predicted through the lag), then fine-tune
+        ePred = emaFF - (burn - burnLag) * g - tgtMw
+        if (a == AGGR_MAX - 1) {
+            // Direct: a step confirmed for FF_CONFIRM_S -> jump straight to the estimated brake, then the loop fine-tunes
+            ffHold = if (abs(ePred) > FF_MIN[a]) ffHold + dt else 0f
+            ffCool -= dt
+            if (ffHold >= FF_CONFIRM_S && ffCool <= 0f) { burn += DIRECT_JUMP * ePred / g; ffHold = 0f; ffCool = 3f * (TAU_FF[a] + PLANT_LAG_S + sensorPeriodS) }
+        } else if (abs(ePred) > FF_MIN[a]) burn += FF_RATE[a] * (ePred - kotlin.math.sign(ePred) * FF_MIN[a] * 0.5f) / g * dt
+        short = eS < -BAND || eU < -USE_MW
         useS = if (eU < -USE_MW) useS + dt else 0f
         when {
-            useS >= 2f -> { burn -= kUse * (-eU) * dt; st = St.IN_USE }
+            useS >= USE_HOLD_S[a] -> { burn -= kUse * (-eU) * dt; st = St.IN_USE }
             eS < -BAND -> { burn -= kDn * (-eS - BAND) * dt; st = if (burn > 0.005f) St.HOLDING else St.IDLE }
             eS > BAND -> { burn += kUp * (eS - BAND) * dt; st = St.BRAKING }
             else -> st = if (burn > 0.005f) St.HOLDING else St.IDLE
@@ -241,6 +298,15 @@ class Controller(val cfg: Cfg) {
     }
 
     companion object {
+        const val AGGR_MAX = 6
+        fun aggrName(a: Int) = when (a) { 1 -> "Gentle"; 2 -> "Calm"; 3 -> "Normal"; 4 -> "Quick"; 5 -> "Fast"; else -> "Direct" }
+        const val STEP_MW = 450f
+        const val SETTLE_MW = 180f
+        const val SETTLE_HOLD_S = 10f
+        const val MIN_STEP_BRAKE_MW = 200f
+        const val PLANT_LAG_S = 0.6f
+        const val FF_CONFIRM_S = 1.2f      // Direct: the step must persist this long (noise rejection)
+        const val DIRECT_JUMP = 0.85f      // Direct: fraction of the estimated brake change applied at once      // CPU/render power reaching the battery reading + the sensor's own averaging
         const val BAND = 50f
         const val USE_MW = 400f
         const val MAH_GAIN = 60f          // mW of target per mAh of error
@@ -249,33 +315,54 @@ class Controller(val cfg: Cfg) {
         const val DRAIN_END_MAH = 1f
         const val FAST_RAMP_S = 20f
         const val REARM_MAH = 20f          // more than this below the target after reaching it -> "charging up" again
-        val TAU_SLOW = floatArrayOf(6f, 5f, 4f, 3f, 2.5f)
-        val TAU_UP = floatArrayOf(27f, 20f, 13f, 9f, 7f)   // v0.1 / 1.5
-        val PCT_UP_S = floatArrayOf(400f, 300f, 200f, 140f, 100f)
+        // per aggressiveness 1..6: filtering, delays and ramps scale together
+        val TAU_SLOW = floatArrayOf(6f, 5f, 4f, 3f, 2.5f, 2.5f)
+        val TAU_UP = floatArrayOf(27f, 20f, 13f, 9f, 7f, 6f)   // v0.1 / 1.5
+        val TAU_DN = floatArrayOf(10f, 9f, 8f, 6f, 5f, 4f)
+        val USE_TAU_K = floatArrayOf(1.3f, 1.15f, 1f, 0.9f, 0.85f, 0.85f)
+        val USE_HOLD_S = floatArrayOf(3f, 2.5f, 2f, 1.75f, 1.6f, 1.6f)
+        val TAU_FF = floatArrayOf(4f, 3.2f, 2.5f, 2f, 1.8f, 3f)
+        val FF_RATE = floatArrayOf(0.06f, 0.1f, 0.18f, 0.3f, 0.5f, 1.6f)   // fraction of the predicted error per second
+        val FF_MIN = floatArrayOf(550f, 500f, 460f, 430f, 410f, 450f)       // only for real steps, not noise
+        val PCT_UP_S = floatArrayOf(400f, 300f, 200f, 140f, 100f, 80f)
     }
 }
 
 /**
- * Splits the controller's brake output into the render stage ("visual": the app drawing at the display's max
- * rate with heavier effects, only in Live view while it is on screen) and CPU burn threads for the rest.
- * Order: render first, then CPU. The total stays the controller's output, so the handoff is smooth:
- * when the render stage goes away (app hidden, screen off) the CPU takes its share at once; when it comes
- * back its capacity ramps in over RAMP_S, moving share from CPU to render gradually.
+ * Splits the controller's brake output between the app's own drawing ("visual": frame rate, glows, effects; only
+ * while the app is on screen) and CPU burn threads. The visual stage is the first responder in BOTH directions:
+ * more brake raises the visuals first (up to the display max), less brake drops the visuals first (down to the
+ * minimum ~3 fps, no glows); the CPU only covers what the visuals can't. The total always equals the controller's
+ * output, so handoffs are smooth: app hidden -> the CPU takes the visual share at once; while not short, CPU share
+ * moves slowly back to the visuals. `floor` (Always smooth) keeps the visuals at least that level (a fixed cost).
  */
-class BrakeSplit(val visMwEst: Float = VIS_MW_EST) {
-    var avail = 0f; private set         // 0..1 how much of the render stage is usable now
-    var vis = 0f; private set           // render share (burn units)
+class BrakeSplit(var visMwEst: Float = VIS_MW_EST) {
+    var avail = 0f; private set         // 0..1 how much of the visual stage is usable now (ramps in)
+    var vis = 0f; private set           // visual share (burn units, above the floor)
     var cpu = 0f; private set           // CPU share (burn units = duty of the burn threads)
-    var visLevel = 0f; private set      // 0..1 render intensity to apply
+    var visLevel = 0f; private set      // 0..1 visual intensity to apply
+    var floor = 0f                       // 0..1 minimum visual level (Always smooth)
     fun fullCap(burnMwFull: Float) = visMwEst / burnMwFull.coerceAtLeast(1f)
-    /** @return the render capacity (burn units) to give the controller this tick. */
+    /** @return the controllable visual capacity (burn units) to give the controller this tick. */
     fun update(dt: Float, renderOk: Boolean, burnMwFull: Float): Float {
         avail = if (!renderOk) 0f else (avail + dt / RAMP_S).coerceAtMost(1f)
-        return fullCap(burnMwFull) * avail
+        return fullCap(burnMwFull) * avail * (1f - floor.coerceIn(0f, 1f))
     }
-    fun split(total: Float, cap: Float, burnMwFull: Float) {
-        vis = minOf(total, cap).coerceAtLeast(0f); cpu = (total - vis).coerceAtLeast(0f)
-        visLevel = if (cap > 0f) (vis / fullCap(burnMwFull)).coerceIn(0f, 1f) else 0f
+    fun reset() { vis = 0f; cpu = 0f; visLevel = floor; avail = 0f }
+    /** @param short the net is below the target: don't move share back to the visuals now. */
+    fun split(total: Float, cap: Float, burnMwFull: Float, dt: Float = 0.25f, short: Boolean = false) {
+        val t = total.coerceAtLeast(0f)
+        val d = t - (vis + cpu)
+        var v = vis; var c = cpu
+        if (d >= 0f) { val add = minOf(d, (cap - v).coerceAtLeast(0f)); v += add; c += d - add }
+        else { val sub = minOf(-d, v); v -= sub; c -= -d - sub }
+        if (v > cap) { c += v - cap; v = cap }                         // visual stage shrank / went away: CPU takes it now
+        if (!short && c > 0f && v < cap) { val m = minOf(c, cap - v, fullCap(burnMwFull) * dt / REBAL_S); v += m; c -= m }
+        c = c.coerceAtLeast(0f); v = v.coerceAtLeast(0f)
+        val err = t - (v + c); if (err != 0f) { if (c + err >= 0f) c += err else v = (v + err).coerceAtLeast(0f) }   // exact total
+        vis = v; cpu = c
+        val fl = floor.coerceIn(0f, 1f)
+        visLevel = if (avail > 0f) (fl + (1f - fl) * v / (fullCap(burnMwFull) * (1f - fl)).coerceAtLeast(1e-6f)).coerceIn(0f, 1f) else fl
     }
-    companion object { const val VIS_MW_EST = 400f; const val RAMP_S = 4f }
+    companion object { const val VIS_MW_EST = 500f; const val RAMP_S = 4f; const val REBAL_S = 30f }
 }

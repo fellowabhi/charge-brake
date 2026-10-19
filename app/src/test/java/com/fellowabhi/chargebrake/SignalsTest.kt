@@ -42,16 +42,16 @@ class SignalsTest {
         assertEquals(49, h.first(999_000L))
     }
 
-    /** UI cost: 120 s background at +300 mW, eco at +260, live at +180 -> eco ~40, live ~120 mW. */
+    /** UI cost: 120 s background at +300 mW, app at +260 (mode 1), mode 2 at +180 -> ~40 / ~120 mW. */
     @Test fun uiCostEstimate() {
         val c = UiCost()
-        assertTrue(c.cost(Monitor.UI_ECO, true).isNaN())
+        assertTrue(c.cost(1, true).isNaN())
         repeat(120) { c.add(Monitor.UI_NONE, true, true, 300f, 1f); c.add(Monitor.UI_NONE, false, true, 900f, 1f) }   // screen off: ignored
-        repeat(120) { c.add(Monitor.UI_ECO, true, true, 260f, 1f) }
-        repeat(120) { c.add(Monitor.UI_LIVE, true, true, 180f, 1f) }
-        assertEquals(40f, c.cost(Monitor.UI_ECO, true), 0.5f)
-        assertEquals(120f, c.cost(Monitor.UI_LIVE, true), 0.5f)
-        assertTrue(c.cost(Monitor.UI_ECO, false).isNaN())
+        repeat(120) { c.add(1, true, true, 260f, 1f) }
+        repeat(120) { c.add(2, true, true, 180f, 1f) }
+        assertEquals(40f, c.cost(1, true), 0.5f)
+        assertEquals(120f, c.cost(2, true), 0.5f)
+        assertTrue(c.cost(1, false).isNaN())
     }
 
     @Test fun bubbleScaleAndHealth() {

@@ -118,7 +118,8 @@ class PillSwitch(ctx: Context) : View(ctx) {
 class ChartView(ctx: Context, private val h: History) : View(ctx) {
     var glowColor = C_ORANGE
     var headColor = C_GREEN
-    var animate = true                       // false = eco: static head dot, no glow line
+    var animate = true                       // false = low visual level: static head dot, no glow line
+    var simple = false                       // lowest visual level: no raw line, no brake fill
     private val d = ctx.resources.displayMetrics.density
     private fun stroke(c: Int, w: Float) = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = c; strokeWidth = w * d; strokeJoin = Paint.Join.ROUND }
     private val pGrid = stroke(0xFF22262D.toInt(), 1f)
@@ -176,7 +177,8 @@ class ChartView(ctx: Context, private val h: History) : View(ctx) {
                 path.lineTo(x(h.t[h.idx(n - 1)]), yb(0f)); path.close()
                 if (burnShader == null || shaderH != hh) { shaderH = hh; burnShader = LinearGradient(0f, T, 0f, T + H, 0x73FF7043, 0x1AFF7043, Shader.TileMode.CLAMP) }
                 pBurn.shader = burnShader
-                c.drawPath(path, pBurn); c.drawPath(path2, pBurnLine)
+                if (!simple) c.drawPath(path, pBurn)
+                c.drawPath(path2, pBurnLine)
             }
             // target band around the current target
             // shown only while holding; dimmed + labelled while charging up to a target; hidden otherwise
@@ -193,7 +195,7 @@ class ChartView(ctx: Context, private val h: History) : View(ctx) {
             }
             if (n >= 2) {
                 path.reset(); ks { k -> val i = h.idx(k); if (k == first) path.moveTo(x(h.t[i]), y(h.net[i])) else path.lineTo(x(h.t[i]), y(h.net[i])) }
-                c.drawPath(path, pRaw)
+                if (!simple) c.drawPath(path, pRaw)
                 path.reset(); ks { k -> val i = h.idx(k); if (k == first) path.moveTo(x(h.t[i]), y(h.ema[i])) else path.lineTo(x(h.t[i]), y(h.ema[i])) }
                 if (animate) { pEmaGlow.color = withAlpha(glowColor, 0.30f); c.drawPath(path, pEmaGlow) }
                 c.drawPath(path, pEma)
@@ -359,5 +361,121 @@ class FlowRow(ctx: Context, private val hGap: Int, private val vGap: Int) : andr
             }
             y += lineH + vGap
         }
+    }
+}
+
+private fun tnumPaint(ctx: Context, sp: Float, bold: Boolean) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    textSize = sp * ctx.resources.displayMetrics.scaledDensity
+    typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, if (bold) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+    fontFeatureSettings = "tnum"
+}
+
+/**
+ * One line of text that shrinks to fit its width (down to minSp, then ends with "…"). Fixed height (from maxSp),
+ * so changing the text never re-lays out anything: only a redraw.
+ */
+class FitLabel(ctx: Context, private val maxSp: Float, private val minSp: Float, bold: Boolean = false) : View(ctx) {
+    private val p = tnumPaint(ctx, maxSp, bold)
+    private val maxPx = p.textSize; private val minPx = minSp * ctx.resources.displayMetrics.scaledDensity
+    var text: String = ""
+        set(v) { if (v != field) { field = v; invalidate() } }
+    var color = C_TXT
+        set(v) { if (v != field) { field = v; invalidate() } }
+    var glow = 0f; var glowColor = 0
+    var center = false
+    override fun onMeasure(ws: Int, hs: Int) {
+        val fm = Paint(p).apply { textSize = maxPx }.fontMetrics
+        val h = kotlin.math.ceil(fm.descent - fm.ascent).toInt() + 2
+        val w = if (MeasureSpec.getMode(ws) == MeasureSpec.UNSPECIFIED) p.apply { textSize = maxPx }.measureText(text).toInt() + 2 else MeasureSpec.getSize(ws)
+        setMeasuredDimension(w, h)
+    }
+    /** Text size (px) this text gets at width w. */
+    fun fitPx(s: String, w: Float): Float { p.textSize = maxPx; val tw = p.measureText(s); return if (tw <= w || tw <= 0f) maxPx else maxOf(minPx, maxPx * w / tw) }
+    override fun onDraw(c: Canvas) {
+        val w = width - paddingLeft - paddingRight.toFloat()
+        var s = text
+        p.textSize = fitPx(s, w)
+        if (p.measureText(s) > w) { while (s.length > 1 && p.measureText("$s…") > w) s = s.dropLast(1); s = s.trimEnd() + "…" }
+        p.color = color
+        if (glow > 0.01f) p.setShadowLayer(glow, 0f, 0f, glowColor) else p.clearShadowLayer()
+        val fm = p.fontMetrics
+        val y = (height - (fm.descent - fm.ascent)) / 2f - fm.ascent
+        if (center) { p.textAlign = Paint.Align.CENTER; c.drawText(s, width / 2f, y, p) } else { p.textAlign = Paint.Align.LEFT; c.drawText(s, paddingLeft.toFloat(), y, p) }
+    }
+}
+
+/**
+ * The big net number + unit. Sized once from its width so the widest normal value ("+8,888") fits; digits are
+ * tabular and right-aligned in a fixed box, so the unit never moves. Wider values (fast chargers) shrink only themselves.
+ */
+class BigNumber(ctx: Context, private val maxSp: Float) : View(ctx) {
+    private val pN = tnumPaint(ctx, maxSp, true)
+    private val pU = tnumPaint(ctx, maxSp * 0.42f, true)
+    private val sd = ctx.resources.displayMetrics.scaledDensity
+    var text = "+0"; set(v) { if (v != field) { field = v; invalidate() } }
+    var unit = "mW"
+    var color = C_GREEN; var glow = 0f
+    private var sizePx = maxSp * sd
+    private fun widthAt(px: Float): Float { pN.textSize = px; pU.textSize = px * 0.42f; return pN.measureText(TEMPLATE) + px * 0.12f + pU.measureText(unit) }
+    override fun onMeasure(ws: Int, hs: Int) {
+        val avail = if (MeasureSpec.getMode(ws) == MeasureSpec.UNSPECIFIED) widthAt(maxSp * sd) else MeasureSpec.getSize(ws).toFloat()
+        val full = widthAt(maxSp * sd)
+        sizePx = if (full > avail) maxSp * sd * avail / full else maxSp * sd
+        setMeasuredDimension(if (MeasureSpec.getMode(ws) == MeasureSpec.UNSPECIFIED) avail.toInt() + 1 else MeasureSpec.getSize(ws), (sizePx * 1.08f).toInt())
+    }
+    override fun onDraw(c: Canvas) {
+        pN.textSize = sizePx; pU.textSize = sizePx * 0.42f
+        val boxW = pN.measureText(TEMPLATE)
+        val tw = pN.measureText(text); if (tw > boxW) pN.textSize = sizePx * boxW / tw
+        val base = height - pN.fontMetrics.descent * 0.6f
+        pN.color = color; pU.color = color
+        if (glow > 0.01f) pN.setShadowLayer(glow, 0f, 0f, withAlpha(color, 0.5f)) else pN.clearShadowLayer()
+        pN.textAlign = Paint.Align.RIGHT; c.drawText(text, boxW, base, pN)
+        pU.textAlign = Paint.Align.LEFT; c.drawText(unit, boxW + sizePx * 0.12f, base, pU)
+    }
+    companion object { const val TEMPLATE = "+8,888" }
+}
+
+/** Small fixed-width two-column table (label · right-aligned tabular value). Changing values only redraws. */
+class RawTable(ctx: Context, private val labels: List<String>, private val template: String, sp: Float = 10.5f) : View(ctx) {
+    private val pL = tnumPaint(ctx, sp, false).apply { color = C_FAINT }
+    private val pV = tnumPaint(ctx, sp, false).apply { color = 0xFFC9CDD3.toInt(); textAlign = Paint.Align.RIGHT }
+    private val d = ctx.resources.displayMetrics.density
+    private val rowH = sp * ctx.resources.displayMetrics.scaledDensity * 1.42f
+    val values = Array(labels.size) { "—" }
+    fun set(i: Int, v: String) { if (values[i] != v) { values[i] = v; invalidate() } }
+    private val lw = labels.maxOf { pL.measureText(it) }
+    override fun onMeasure(ws: Int, hs: Int) = setMeasuredDimension((lw + 10 * d + pV.measureText(template)).toInt() + 1, (rowH * labels.size).toInt() + 1)
+    override fun onDraw(c: Canvas) {
+        val fm = pV.fontMetrics
+        for (i in labels.indices) {
+            val y = rowH * i + (rowH - (fm.descent - fm.ascent)) / 2f - fm.ascent
+            c.drawText(labels[i], 0f, y, pL)
+            val v = values[i]; pV.textSize = pL.textSize
+            val maxW = width - lw - 8 * d; val tw = pV.measureText(v); if (tw > maxW) pV.textSize = pL.textSize * maxW / tw
+            c.drawText(v, width.toFloat(), y, pV)
+            if (i < labels.size - 1) { pL.alpha = 40; c.drawLine(0f, rowH * (i + 1), width.toFloat(), rowH * (i + 1), pL); pL.alpha = 255 }
+        }
+    }
+}
+
+/** "Visual level" indicator: eye icon, a thin teal bar and "42% · 51 fps" (fixed width). */
+class VisualMeter(ctx: Context) : View(ctx) {
+    private val d = ctx.resources.displayMetrics.density
+    private val icon = ctx.getDrawable(R.drawable.ic_eye)!!.mutate()
+    private val pT = tnumPaint(ctx, 10.5f, false).apply { color = C_DIM }
+    private val pB = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val rect = RectF()
+    var level = 0f; var fps = 0f; var smooth = false
+    private val template = "100% · 120 fps"
+    override fun onMeasure(ws: Int, hs: Int) = setMeasuredDimension((14 * d + 6 * d + 26 * d + 6 * d + pT.measureText(template) + 2 * d).toInt(), (22 * d).toInt())
+    override fun onDraw(c: Canvas) {
+        val h = height.toFloat(); val cy = h / 2
+        icon.setTint(lerpColor(C_FAINT, C_TEAL, level.coerceIn(0f, 1f))); icon.setBounds(0, (cy - 7 * d).toInt(), (14 * d).toInt(), (cy + 7 * d).toInt()); icon.draw(c)
+        val bx = 20 * d; rect.set(bx, cy - 2 * d, bx + 26 * d, cy + 2 * d)
+        pB.color = 0xFF262A31.toInt(); c.drawRoundRect(rect, 2 * d, 2 * d, pB)
+        rect.right = bx + 26 * d * level.coerceIn(0f, 1f); pB.color = C_TEAL; if (rect.width() > 1f) c.drawRoundRect(rect, 2 * d, 2 * d, pB)
+        val s = String.format(java.util.Locale.US, "%d%% · %d fps", (level * 100).safeRound(), fps.safeRound())
+        c.drawText(s, bx + 32 * d, cy - (pT.fontMetrics.ascent + pT.fontMetrics.descent) / 2, pT)
     }
 }

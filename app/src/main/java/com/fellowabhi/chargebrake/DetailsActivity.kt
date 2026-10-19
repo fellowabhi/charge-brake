@@ -27,6 +27,8 @@ class DetailsActivity : Activity() {
     private lateinit var unitRow: FlowRow
     private lateinit var mahRow: LinearLayout
     private lateinit var tgtTv: TextView
+    private lateinit var settleTv: TextView
+    private lateinit var shareBtn: TextView
     private val tick: () -> Unit = { refresh() }
 
     override fun onCreate(b: Bundle?) {
@@ -63,12 +65,20 @@ class DetailsActivity : Activity() {
         col.add(text(11.5f, C_FAINT, txt = "Gentle −150 mW · Normal −400 mW · Fast = max brake (still paused at the temperature cutoff). How fast it really drains depends on the charger: on a 5 W charger even max brake may only reach about −300 mW."), dp(6))
         slider(col, "Fallback net target (no mAh)", -200, 500, 25, cfg.targetMw, { "%+d mW".format(it) }) { cfg.targetMw = it; Monitor.changed("target_mW", it) }
         section("BRAKE")
-        slider(col, "Aggressiveness", 1, 5, 1, cfg.aggr, { "$it" }) { cfg.aggr = it; Monitor.changed("aggr", it) }
+        slider(col, "Brake response", 1, Controller.AGGR_MAX, 1, cfg.aggr, { "$it · ${Controller.aggrName(it)}" + if (it == 3) " (default)" else "" }) { cfg.aggr = it; Monitor.changed("aggr", Controller.aggrName(it)) }
+        col.add(text(11.5f, C_FAINT, txt = "Higher = less filtering, shorter delays, faster ramps. Every level adds feed-forward from the estimated surplus to cut the lag; Direct jumps to the estimated brake at once, then fine-tunes. Normal is steadiest on noisy sensors."), dp(4))
+        settleTv = text(13f, C_TXT); col.add(settleTv, dp(6))
         col.add(text(14f, C_DIM, txt = "Max brake power"), dp(12))
         powRow = FlowRow(this, dp(6), dp(6)); col.add(powRow, dp(8)); updPow()
-        col.add(text(11.5f, C_FAINT, txt = "Normal = the Max brake % below on the chosen threads (default 80 %, 4 threads). High = all ${Monitor.cores} cores at 100 %. Max = all cores at 100 % with normal-priority threads (can slow the phone). Higher levels get the phone warm; the temperature cutoff (${cfg.tempCutoffC.toInt()} °C) always applies. In Live view the app's own drawing (higher frame rate, glows) is used first, CPU threads only for the rest."), dp(6))
+        col.add(text(11.5f, C_FAINT, txt = "Normal = the Max brake % below on the chosen threads (default 80 %, 4 threads). High = all ${Monitor.cores} cores at 100 %. Max = all cores at 100 % with normal-priority threads (can slow the phone). Higher levels get the phone warm; the temperature cutoff (${cfg.tempCutoffC.toInt()} °C) always applies."), dp(6))
         slider(col, "Max brake (Normal)", 10, 100, 5, (Monitor.userMaxBurn * 100).toInt(), { "$it%" }) { Monitor.changeMaxBurn(it / 100f) }
         slider(col, "Brake threads (Normal)", 1, 8, 1, Monitor.threads, { "$it" }) { Monitor.changeThreads(it) }
+        section("VISUALS")
+        col.add(Switch(this).apply {
+            text = "Always smooth"; setTextColor(C_TXT); textSize = 14f; isChecked = Monitor.alwaysSmooth
+            setOnCheckedChangeListener { _, on -> Monitor.setAlwaysSmooth(on) }
+        }, dp(10))
+        col.add(text(11.5f, C_FAINT, txt = "Off (default): the app's own drawing is part of the brake. Short of power → frame rate down to ~3 fps, glows and pulses off, simpler graph; surplus → visuals up to the display max before any CPU burn. Touching makes it smooth for a moment. On: never below a smooth level (costs a bit more power)."), dp(4))
         section("SAFETY")
         slider(col, "Fast-charger cutoff (10 s avg)", 1000, 20000, 500, cfg.fastCutoffMw, { String.format(Locale.US, "%.1f W", it / 1000f) }) { cfg.fastCutoffMw = it; Monitor.changed("fast_cutoff_mW", it) }
         slider(col, "Temperature cutoff", 350, 550, 5, (cfg.tempCutoffC * 10).toInt(), { String.format(Locale.US, "%.1f °C", it / 10f) }) { cfg.tempCutoffC = it / 10f; Monitor.changed("temp_cutoff", it / 10f) }
@@ -79,10 +89,15 @@ class DetailsActivity : Activity() {
         batBtn = button("Battery optimisation") { reqBat() }; col.add(batBtn, dp(14))
         section("APP'S OWN POWER (ESTIMATE)")
         costTv = text(13f, C_TXT); col.add(costTv, dp(8))
-        col.add(text(11.5f, C_FAINT, txt = "Estimate: the 10 min average of net + brake power with this app's main screen in front (Eco or Live) minus the same with the app in the background, screen on. Includes the screen content drawing, not the display itself; charger and phone-use changes add noise."), dp(4))
+        col.add(text(11.5f, C_FAINT, txt = "Estimate: the 10 min average of net + brake power with this app's main screen in front minus the same with the app in the background, screen on. Includes the screen content drawing, not the display itself; charger and phone-use changes add noise."), dp(4))
         section("SENSOR")
         tv = text(12.5f, C_TXT, mono = true); col.add(tv, dp(8))
-        col.add(button("Share log (CSV)", 0xFF00838F.toInt()) { share() }, dp(14))
+        col.add(Switch(this).apply {
+            text = "Debug logging"; setTextColor(C_TXT); textSize = 14f; isChecked = Monitor.debugLog
+            setOnCheckedChangeListener { _, on -> Monitor.setDebugLog(on) }
+        }, dp(14))
+        col.add(text(11.5f, C_FAINT, txt = "Off by default. On: a 1 Hz CSV row (kept in memory, last ~4 h) to share for tuning."), dp(4))
+        shareBtn = button("Share log (CSV)", 0xFF00838F.toInt()) { if (Monitor.logRows() > 0) share() }; col.add(shareBtn, dp(10))
         col.add(button("Reset unit/sign detection") { Monitor.resetDetection(); Toast.makeText(this, "Reset", Toast.LENGTH_SHORT).show() }, dp(10))
         col.add(text(11f, C_FAINT, txt = "v${Monitor.VERSION} · no ads, no internet"), dp(16))
         setContentView(ScrollView(this).apply { fitsSystemWindows = true; setBackgroundColor(C_BG); addView(col) })
@@ -128,7 +143,7 @@ class DetailsActivity : Activity() {
     override fun onResume() {
         super.onResume()
         val ok = (getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)
-        batBtn.text = if (ok) "Battery optimisation: exempt ✓" else "Allow running in background (battery optimisation)"
+        batBtn.text = if (ok) "Battery optimisation: exempt" else "Allow running in background (battery optimisation)"
     }
 
     private fun reqBat() {
@@ -147,7 +162,12 @@ class DetailsActivity : Activity() {
             return if (v.isNaN()) String.format(Locale.US, "%s: measuring (%.0f of 1 min)", name, minOf(mins, 1f) * 1f) else String.format(Locale.US, "%s: ~%s mW (%.0f min of data)", name, fmtInt(v), mins)
         }
         costTv.text = (if (pl) "Plugged in" else "On battery") + String.format(Locale.US, " · background (screen on): %.0f min of data\n", m.cost.seconds(Monitor.UI_NONE, pl) / 60f) +
-            one(Monitor.UI_ECO, "Eco view") + "\n" + one(Monitor.UI_LIVE, "Live view")
+            one(Monitor.UI_APP, "App on screen (adaptive visuals)")
+        settleTv.text = if (c.avgSettleS.isNaN()) "Time to settle: measuring (needs a power step > 300 mW)" + (if (c.settling) " · settling now…" else "")
+            else String.format(Locale.US, "Time to settle: last %.1f s · average %.1f s%s", c.lastSettleS, c.avgSettleS, if (c.settling) " · settling now…" else "")
+        val rows = m.logRows()
+        shareBtn.isEnabled = rows > 0; shareBtn.alpha = if (rows > 0) 1f else 0.45f
+        shareBtn.text = if (rows > 0) "Share log (CSV · $rows rows)" else if (m.debugLog) "Share log · collecting…" else "Share log · no data (turn on Debug logging)"
         tv.text = String.format(Locale.US, """
             raw CURRENT_NOW   %d
             raw CURRENT_AVG   %d
@@ -171,7 +191,8 @@ class DetailsActivity : Activity() {
             target power      %+.0f mW
             ema slow / use    %+.0f / %+.0f mW
             brake             %.1f %% x %d threads (~%.0f mW) · power %s
-            brake split       visual %.0f mW (level %.2f, render %s) · CPU %.0f mW
+            brake split       visual %.0f mW (level %.2f, on screen %s) · CPU %.0f mW · smooth %b
+            response          %s · feed-forward pred %+.0f mW · settle %.1f s
             target mAh set    %.1f (≈%d %%) · hold mAh %.1f
             fast 10 s avg     %.0f mW (cutoff %d) retry %d s ignore %b
             sensor period     %.2f s (controller est.)
@@ -181,9 +202,9 @@ class DetailsActivity : Activity() {
             m.mwOk, m.rateHz, SystemClock.elapsedRealtime() - m.lastChange, m.chargeCounter, m.mahT.gaugeMah, m.mah, m.mahT.source,
             c.targetMah, m.pct, m.temp, plugName(m.plugged), m.status, m.health, m.maxChgUa, m.maxChgUv,
             m.state.name, if (c.paused) "(paused)" else "", Mode.name(f.mode), Mode.name(c.effMode), if (f.holdCurrent) "current" else "target", c.hold(), Drain.name(f.drainSpeed), c.draining,
-            c.tgtMw, c.emaSlow, c.emaUse, c.burn * 100, m.burner.threads, m.burnMw, m.powerName(), m.visMw, m.visLevel, if (m.renderOk) "on" else "off", m.cpuMw,
+            c.tgtMw, c.emaSlow, c.emaUse, c.burn * 100, m.burner.threads, m.burnMw, m.powerName(), m.visMw, m.visLevel, if (m.renderOk) "yes" else "no", m.cpuMw, m.alwaysSmooth, Controller.aggrName(f.aggr), c.ePred, c.lastSettleS,
             f.targetMahSet, c.approxPct(f.targetMahSet, m.pct, m.mah), c.holdMah, c.fastMw, f.fastCutoffMw, c.fastRetryInS, c.ignoreFast,
-            c.sensorPeriodS, m.logRows())
+            c.sensorPeriodS, m.logRows()).replace("NaN", "—")
     }
 
     private fun share() {

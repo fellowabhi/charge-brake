@@ -4,6 +4,15 @@ Android app that holds your battery level on a slow charger, without root.
 It reads live battery power and, when the phone is gaining charge, adds just enough
 low-priority CPU load ("brake") to keep net power around 0. No ads, no analytics, no internet permission.
 
+**v0.5.2**
+- **One adaptive mode** (Eco / Live removed): the app's own drawing is part of the brake, both ways. Short of the target: visuals drop first (down to 3 fps, no glows / pulses, simple graph); surplus: visuals rise first (up to the display max), CPU only for the rest. Visual level shown next to the title (eye · % · fps). Optional **Always smooth** (Details) keeps visuals at least at half. Sims include "app open on a weak charger".
+- **Brake response** 1-6: Gentle, Calm, Normal (default), Quick, Fast, **Direct**. Higher = less filtering, shorter delays, faster ramps; feed-forward with a lag predictor at every level (Direct: jumps to the estimated brake on a confirmed step). Details shows an approximate **time to settle**.
+- **Crash on unplug / replug fixed** (NaN charger estimate formatted on the main thread). Number formatting is NaN-safe; plug changes reset the use estimates together; the service stops cleanly instead of crashing if it may not go foreground.
+- **Debug logging** off by default (Details); Share log only when there is data.
+- **Bubble**: hidden while the app is on screen, back when you leave it. Pill line 1 = status icon + word; thin close (x) turns the bubble off (on again from the notification or the app). Centre: auto-fitted net number + small "B 38%".
+- Main value card with a thin state-coloured ring and a fixed-width raw table (raw mW, mA, V, sensor Hz, phone use, charger).
+- Shorter auto-fitting banner texts ("Braking · 420 mW · hold 2,916 mAh"); vector icons instead of text symbols.
+
 **v0.5.1**
 - **Render brake first, then CPU** (Live view, only while the app is on screen): the brake output goes to the app's own drawing first (max display refresh rate, drifting glow layers, stronger glows), CPU threads only for the rest. Screen off / app hidden: CPU only, and the CPU takes over the render share at once (no step); when the render stage comes back it ramps in over 4 s. Eco has no render brake. The brake tile and Details show visual vs CPU (teal / orange bar).
 - **Exact mAh target**: a target % is converted once to mAh (middle of that % step) and held exactly; Hold current locks the exact mAh now. Optional: enter the target in mAh (Details, stepper ±10 mAh). Banner / bubble: "Hold 2,916 mAh (≈60%)". Targets move with the mAh scale when the source switches.
